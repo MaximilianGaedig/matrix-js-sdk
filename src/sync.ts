@@ -52,6 +52,7 @@ import {
     type ITimeline,
     type IToDeviceEvent,
     type ReceivedToDeviceMessage,
+    STATE_TRIMMED_KEY,
 } from "./sync-accumulator.ts";
 import { MatrixEvent } from "./models/event.ts";
 import { type MatrixError, Method } from "./http-api/index.ts";
@@ -718,7 +719,7 @@ export class SyncApi {
         });
 
         this.savedSyncPromise = this.client.store
-            .getSavedSync()
+            .getSavedSync(this.opts.savedSyncTrim)
             .then((savedSync) => {
                 this.syncOpts.logger.debug(`Got reply from saved sync, exists? ${!!savedSync}`);
                 if (savedSync) {
@@ -830,6 +831,11 @@ export class SyncApi {
             catchingUp: false,
             fromCache: true,
         };
+
+        // Rooms whose state the replay trimmed: the rest is read from the store when a room is opened.
+        for (const [roomId, room] of Object.entries(savedSync.roomsData.join ?? {})) {
+            if ((room as unknown as Record<string, unknown>)[STATE_TRIMMED_KEY]) this.client.markRoomStateStored(roomId);
+        }
 
         const data: ISyncResponse = {
             next_batch: nextSyncToken,
@@ -1263,7 +1269,12 @@ export class SyncApi {
         await Promise.all(
             joinRooms.map(async (joinObj) => {
                 const room = joinObj.room;
-                const stateEvents = this.mapSyncEventsFormat(joinObj.state, room);
+                // `state` and `state_after` (MSC4222) carry the same state twice, before and after the
+                // timeline block. When the server sends `state_after` that is what the room is built
+                // from, so turning the other copy into events as well is pure waste: on a large account
+                // that is thousands of objects per sync and per replay of the stored sync.
+                const hasStateAfter = "org.matrix.msc4222.state_after" in joinObj;
+                const stateEvents = hasStateAfter ? [] : this.mapSyncEventsFormat(joinObj.state, room);
                 const stateAfterEvents = this.mapSyncEventsFormat(joinObj["org.matrix.msc4222.state_after"], room);
                 // Prevent events from being decrypted ahead of time
                 // this helps large account to speed up faster
@@ -1278,7 +1289,7 @@ export class SyncApi {
                 // regular timeline events do *not* count towards state. If it's not present, then the state is formed by
                 // the state events plus the timeline events. Note mapSyncEventsFormat returns an empty array if the field
                 // is absent so we explicitly check the field on the original object.
-                const eventsFormingFinalState = joinObj["org.matrix.msc4222.state_after"]
+                const eventsFormingFinalState = hasStateAfter
                     ? stateAfterEvents
                     : stateEvents.concat(timelineEvents);
 
@@ -1428,7 +1439,7 @@ export class SyncApi {
                 }
 
                 try {
-                    if ("org.matrix.msc4222.state_after" in joinObj) {
+                    if (hasStateAfter) {
                         await this.injectRoomEvents(
                             room,
                             undefined,
@@ -1485,7 +1496,7 @@ export class SyncApi {
                 const emitEvent = (e: MatrixEvent): boolean => client.emit(ClientEvent.Event, e);
                 // this fires a couple of times for some events. (eg state events are in the timeline and the state)
                 // should this get a sync section as an additional event emission param (e, syncSection))?
-                stateEvents.forEach(emitEvent);
+                (hasStateAfter ? stateAfterEvents : stateEvents).forEach(emitEvent);
                 timelineEvents.forEach(emitEvent);
                 ephemeralEvents.forEach(emitEvent);
                 accountDataEvents.forEach(emitEvent);

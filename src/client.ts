@@ -20,6 +20,7 @@ limitations under the License.
 
 import type { IDeviceKeys, IOneTimeKey } from "./@types/crypto.ts";
 import { type ISyncStateData, type SetPresence, SyncApi, type SyncApiOptions, SyncState } from "./sync.ts";
+import { LOCAL_PAGINATION_PREFIX, type SavedSyncTrim } from "./sync-accumulator.ts";
 import {
     EventStatus,
     type IContent,
@@ -101,7 +102,12 @@ import {
     type RoomNameState,
 } from "./models/room.ts";
 import { RoomMemberEvent, type RoomMemberEventHandlerMap } from "./models/room-member.ts";
-import { RoomStateEvent, type IPowerLevelsContent, type RoomStateEventHandlerMap } from "./models/room-state.ts";
+import {
+    RoomStateEvent,
+    type IPowerLevelsContent,
+    type RoomState,
+    type RoomStateEventHandlerMap,
+} from "./models/room-state.ts";
 import {
     isSendDelayedEventRequestOpts,
     UpdateDelayedEventAction,
@@ -504,6 +510,13 @@ export interface IStartClientOpts {
      * The event `limit=` to apply to initial sync. Default: 8.
      */
     initialSyncLimit?: number;
+
+    /**
+     * Replay only each room's latest events from the stored sync at startup (the rest is read from the
+     * store when the timeline is paginated back). Makes startup and memory scale with the number of rooms
+     * rather than the stored history.
+     */
+    savedSyncTrim?: SavedSyncTrim;
 
     /**
      * True to put `archived=true</code> on the <code>/initialSync` request. Default: false.
@@ -4957,6 +4970,76 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         return this.getEventTimeline(timelineSet, event.event_id);
     }
 
+    /** Rooms whose state a trimmed replay left in the store; see {@link loadStoredRoomState}. */
+    private readonly roomsWithStoredState = new Set<string>();
+    private readonly storedStateLoads = new Map<string, Promise<void>>();
+
+    /** @internal Called while replaying a trimmed saved sync. */
+    public markRoomStateStored(roomId: string): void {
+        this.roomsWithStoredState.add(roomId);
+    }
+
+    /** Whether a room's full state is in memory (false after a trimmed replay, until it's loaded). */
+    public hasFullRoomState(roomId: string): boolean {
+        return !this.roomsWithStoredState.has(roomId);
+    }
+
+    /**
+     * Brings a room's whole state into memory when the saved-sync replay kept only what the room list
+     * needs (see {@link IStartClientOpts.savedSyncTrim}): call it before showing a room or reading its
+     * state. Events already in memory are newer (live sync), so only missing ones are added. Resolves
+     * right away for rooms that are complete.
+     */
+    public loadStoredRoomState(roomId: string): Promise<void> {
+        if (!this.roomsWithStoredState.has(roomId)) return Promise.resolve();
+        let load = this.storedStateLoads.get(roomId);
+        if (!load) {
+            load = this.doLoadStoredRoomState(roomId).finally(() => this.storedStateLoads.delete(roomId));
+            this.storedStateLoads.set(roomId, load);
+        }
+        return load;
+    }
+
+    private async doLoadStoredRoomState(roomId: string): Promise<void> {
+        const stored = await this.store.getCachedRoomState?.(roomId);
+        this.roomsWithStoredState.delete(roomId);
+        const room = this.getRoom(roomId);
+        if (!stored || !room) return;
+        const mapper = this.getEventMapper();
+        const missingFrom = (state: RoomState): MatrixEvent[] =>
+            stored
+                .filter((ev) => !state.getStateEvents(ev.type, ev.state_key))
+                .map((ev) => mapper({ ...ev, room_id: roomId }));
+        const startState = room.getLiveTimeline().getState(EventTimeline.BACKWARDS);
+        if (startState) startState.setStateEvents(missingFrom(startState));
+        room.currentState.setStateEvents(missingFrom(room.currentState));
+    }
+
+    /**
+     * Answers a /messages request for a local pagination token (the start of a trimmed replay, see
+     * {@link IStartClientOpts.savedSyncTrim}) from the store: the room's stored events before that point,
+     * and the server token to continue from after them. No network, so it works offline too.
+     */
+    private async storedMessagesBefore(
+        roomId: string,
+        token: string,
+        dir: Direction,
+        timelineFilter?: Filter,
+    ): Promise<IMessagesResponse> {
+        // A trimmed replay only leaves out older events: there is nothing stored after its start.
+        if (dir !== Direction.Backward) return { chunk: [], start: token };
+        const eventId = token.slice(LOCAL_PAGINATION_PREFIX.length);
+        const stored = await this.store.getCachedTimelineBefore?.(roomId, eventId);
+        let chunk = (stored?.events ?? []).slice().reverse() as IRoomEvent[]; // newest first, like /messages
+        if (timelineFilter) {
+            const kept = new Set(
+                timelineFilter.filterRoomTimeline(chunk.map((e) => new MatrixEvent(e))).map((e) => e.getId()),
+            );
+            chunk = chunk.filter((e) => kept.has(e.event_id));
+        }
+        return { chunk, start: token, end: stored?.prevBatch ?? undefined, state: [] };
+    }
+
     /**
      * Makes a request to /messages with the appropriate lazy loading filter set.
      * XXX: if we do get rid of scrollback (as it's not used at the moment),
@@ -4974,6 +5057,9 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         dir: Direction,
         timelineFilter?: Filter,
     ): Promise<IMessagesResponse> {
+        if (fromToken?.startsWith(LOCAL_PAGINATION_PREFIX)) {
+            return this.storedMessagesBefore(roomId, fromToken, dir, timelineFilter);
+        }
         const path = utils.encodeUri("/rooms/$roomId/messages", { $roomId: roomId });
 
         const params: Record<string, string> = {
@@ -6331,22 +6417,65 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             return this.serverVersionsPromise;
         }
 
-        // We send an authenticated request as of MSC4026
-        this.serverVersionsPromise = this.http
-            .authedRequest<IServerVersions>(Method.Get, "/_matrix/client/versions", undefined, undefined, {
-                prefix: "",
-            })
-            .catch((e) => {
-                // Need to unset this if it fails, otherwise we'll never retry
-                this.serverVersionsPromise = undefined;
-                // but rethrow the exception to anything that was waiting
-                throw e;
-            });
+        // A signed-in client answers from the last response it saw, so startup and features that check
+        // /versions don't wait on the network (or fail offline); the response is refreshed in the background.
+        const cached = this.loadCachedVersions();
+        if (cached) {
+            this.serverVersionsPromise = Promise.resolve(cached);
+            this.canSupport = await buildFeatureSupportMap(cached);
+            void this.fetchVersions().then(
+                (fresh) => {
+                    this.serverVersionsPromise = Promise.resolve(fresh);
+                },
+                (e) => this.logger.debug("Background /versions refresh failed; keeping the cached response", e),
+            );
+            return cached;
+        }
 
-        const serverVersions = await this.serverVersionsPromise;
-        this.canSupport = await buildFeatureSupportMap(serverVersions);
+        this.serverVersionsPromise = this.fetchVersions().catch((e) => {
+            // Need to unset this if it fails, otherwise we'll never retry
+            this.serverVersionsPromise = undefined;
+            // but rethrow the exception to anything that was waiting
+            throw e;
+        });
+        await this.serverVersionsPromise;
 
         return this.serverVersionsPromise;
+    }
+
+    private versionsCacheKey(): string | undefined {
+        const userId = this.getUserId();
+        return userId ? `mx_server_versions|${this.baseUrl}|${userId}` : undefined;
+    }
+
+    private loadCachedVersions(): IServerVersions | undefined {
+        const key = this.versionsCacheKey();
+        if (!key) return undefined;
+        try {
+            const cached = JSON.parse(globalThis.localStorage?.getItem(key) ?? "null");
+            return Array.isArray(cached?.versions) ? cached : undefined;
+        } catch {
+            return undefined;
+        }
+    }
+
+    private async fetchVersions(): Promise<IServerVersions> {
+        // We send an authenticated request as of MSC4026
+        const serverVersions = await this.http.authedRequest<IServerVersions>(
+            Method.Get,
+            "/_matrix/client/versions",
+            undefined,
+            undefined,
+            { prefix: "" },
+        );
+        this.canSupport = await buildFeatureSupportMap(serverVersions);
+        const key = this.versionsCacheKey();
+        if (key) {
+            try {
+                globalThis.localStorage?.setItem(key, JSON.stringify(serverVersions));
+            } catch {}
+        }
+        return serverVersions;
     }
 
     /**

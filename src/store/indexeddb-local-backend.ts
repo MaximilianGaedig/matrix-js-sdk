@@ -14,11 +14,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { type IMinimalEvent, type ISyncData, type ISyncResponse, SyncAccumulator } from "../sync-accumulator.ts";
+import {
+    type CachedTimelineChunk,
+    type IMinimalEvent,
+    type ISyncData,
+    type ISyncResponse,
+    type SavedSyncTrim,
+    SyncAccumulator,
+} from "../sync-accumulator.ts";
 import { deepCopy, promiseTry } from "../utils.ts";
 import { exists as idbExists } from "../indexeddb-helpers.ts";
 import { logger } from "../logger.ts";
-import type { SyncUserProfile, IStateEventWithRoomId, IStoredClientOpts } from "../matrix.ts";
+import type { SyncUserProfile, IStateEvent, IStateEventWithRoomId, IStoredClientOpts } from "../matrix.ts";
 import { type ISavedSync } from "./index.ts";
 import { type IIndexedDBBackend, type UserTuple } from "./indexeddb-backend.ts";
 import { type IndexedToDeviceBatch, type ToDeviceBatchWithTxnId } from "../models/ToDeviceMessage.ts";
@@ -384,8 +391,8 @@ export class LocalIndexedDBStoreBackend implements IIndexedDBBackend {
      * client state to where it was at the last save, or null if there
      * is no saved sync data.
      */
-    public getSavedSync(copy = true): Promise<ISavedSync | null> {
-        const data = this.syncAccumulator.getJSON();
+    public getSavedSync(copy = true, trim?: SavedSyncTrim): Promise<ISavedSync | null> {
+        const data = this.syncAccumulator.getJSON(false, trim);
         if (!data.nextBatch) return Promise.resolve(null);
         if (copy) {
             // We must deep copy the stored data so that the /sync processing code doesn't
@@ -394,6 +401,14 @@ export class LocalIndexedDBStoreBackend implements IIndexedDBBackend {
         } else {
             return Promise.resolve(data);
         }
+    }
+
+    public getCachedRoomState(roomId: string): Promise<IStateEvent[] | null> {
+        return Promise.resolve(deepCopy(this.syncAccumulator.getCachedRoomState(roomId)));
+    }
+
+    public getCachedTimelineBefore(roomId: string, eventId: string): Promise<CachedTimelineChunk | null> {
+        return Promise.resolve(deepCopy(this.syncAccumulator.getCachedTimelineBefore(roomId, eventId)));
     }
 
     public getNextBatchToken(): Promise<string> {

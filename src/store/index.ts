@@ -20,9 +20,16 @@ import { type SyncUserProfile, type User } from "../models/user.ts";
 import { type IEvent, type MatrixEvent } from "../models/event.ts";
 import { type Filter } from "../filter.ts";
 import { type RoomSummary } from "../models/room-summary.ts";
-import { type IMinimalEvent, type IRooms, type ISyncResponse } from "../sync-accumulator.ts";
+import {
+    type CachedTimelineChunk,
+    type IMinimalEvent,
+    type IRooms,
+    type ISyncResponse,
+    type SavedSyncTrim,
+} from "../sync-accumulator.ts";
 import { type IStartClientOpts } from "../client.ts";
 import { type IStateEventWithRoomId } from "../@types/search.ts";
+import { type IStateEvent } from "../sync-accumulator.ts";
 import { type IndexedToDeviceBatch, type ToDeviceBatchWithTxnId } from "../models/ToDeviceMessage.ts";
 import { type EventEmitterEvents } from "../models/typed-event-emitter.ts";
 
@@ -196,8 +203,17 @@ export interface IStore {
      * @returns Promise which resolves with a sync response to restore the
      * client state to where it was at the last save, or null if there
      * is no saved sync data.
+     * @param trim - replay only each room's latest events; see {@link SavedSyncTrim}
      */
-    getSavedSync(): Promise<ISavedSync | null>;
+    getSavedSync(trim?: SavedSyncTrim): Promise<ISavedSync | null>;
+
+    /**
+     * The stored timeline before an event that a trimmed saved sync left out, if this store keeps one.
+     */
+    getCachedTimelineBefore?(roomId: string, eventId: string): Promise<CachedTimelineChunk | null>;
+
+    /** A room's whole stored current state, when the saved sync replayed only part of it. */
+    getCachedRoomState?(roomId: string): Promise<IStateEvent[] | null>;
 
     /**
      * @returns If there is a saved sync, the nextBatch token

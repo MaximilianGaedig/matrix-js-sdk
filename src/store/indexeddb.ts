@@ -21,9 +21,10 @@ import { type IEvent, MatrixEvent } from "../models/event.ts";
 import { logger } from "../logger.ts";
 import { type ISavedSync } from "./index.ts";
 import { type IIndexedDBBackend } from "./indexeddb-backend.ts";
-import { type ISyncResponse } from "../sync-accumulator.ts";
+import { type CachedTimelineChunk, type ISyncResponse, type SavedSyncTrim } from "../sync-accumulator.ts";
 import { type EventEmitterEvents, TypedEventEmitter } from "../models/typed-event-emitter.ts";
 import { type IStateEventWithRoomId } from "../@types/search.ts";
+import { type IStateEvent } from "../sync-accumulator.ts";
 import { type IndexedToDeviceBatch, type ToDeviceBatchWithTxnId } from "../models/ToDeviceMessage.ts";
 import { type IStoredClientOpts } from "../client.ts";
 import { type SyncUserProfile } from "../models/user.ts";
@@ -185,9 +186,29 @@ export class IndexedDBStore extends MemoryStore {
      * client state to where it was at the last save, or null if there
      * is no saved sync data.
      */
-    public getSavedSync = this.degradable((): Promise<ISavedSync | null> => {
-        return this.backend.getSavedSync();
+    public getSavedSync = this.degradable((trim?: SavedSyncTrim): Promise<ISavedSync | null> => {
+        return this.backend.getSavedSync(undefined, trim);
     }, "getSavedSync");
+
+    /** A lookup: a failure means no stored state (not a broken store to degrade). */
+    public async getCachedRoomState(roomId: string): Promise<IStateEvent[] | null> {
+        try {
+            return await this.backend.getCachedRoomState(roomId);
+        } catch (e) {
+            logger.warn("Could not read the stored room state", e);
+            return null;
+        }
+    }
+
+    /** A lookup: a failure means no stored history (not a broken store to degrade). */
+    public async getCachedTimelineBefore(roomId: string, eventId: string): Promise<CachedTimelineChunk | null> {
+        try {
+            return await this.backend.getCachedTimelineBefore(roomId, eventId);
+        } catch (e) {
+            logger.warn("Could not read the stored timeline", e);
+            return null;
+        }
+    }
 
     /** @returns whether or not the database was newly created in this session. */
     public isNewlyCreated = this.degradable((): Promise<boolean> => {

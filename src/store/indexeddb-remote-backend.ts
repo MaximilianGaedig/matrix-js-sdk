@@ -17,10 +17,11 @@ limitations under the License.
 import { logger } from "../logger.ts";
 import { type ISavedSync } from "./index.ts";
 import { type IStoredClientOpts } from "../client.ts";
-import { type IStateEventWithRoomId, type ISyncResponse } from "../matrix.ts";
+import { type IStateEvent, type IStateEventWithRoomId, type ISyncResponse } from "../matrix.ts";
 import { type IIndexedDBBackend, type UserTuple } from "./indexeddb-backend.ts";
 import { type IndexedToDeviceBatch, type ToDeviceBatchWithTxnId } from "../models/ToDeviceMessage.ts";
 import { type SyncUserProfile } from "../models/user.ts";
+import { type CachedTimelineChunk, type SavedSyncTrim } from "../sync-accumulator.ts";
 
 export class RemoteIndexedDBStoreBackend implements IIndexedDBBackend {
     private worker?: Worker;
@@ -77,8 +78,16 @@ export class RemoteIndexedDBStoreBackend implements IIndexedDBBackend {
      * client state to where it was at the last save, or null if there
      * is no saved sync data.
      */
-    public getSavedSync(): Promise<ISavedSync> {
-        return this.doCmd("getSavedSync");
+    public getSavedSync(copy?: boolean, trim?: SavedSyncTrim): Promise<ISavedSync> {
+        return this.doCmd("getSavedSync", [trim]);
+    }
+
+    public getCachedTimelineBefore(roomId: string, eventId: string): Promise<CachedTimelineChunk | null> {
+        return this.doCmd("getCachedTimelineBefore", [roomId, eventId]);
+    }
+
+    public getCachedRoomState(roomId: string): Promise<IStateEvent[] | null> {
+        return this.doCmd("getCachedRoomState", [roomId]);
     }
 
     public getNextBatchToken(): Promise<string> {

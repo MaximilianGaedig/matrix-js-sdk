@@ -15,16 +15,25 @@ limitations under the License.
 */
 
 import { type ISavedSync } from "./index.ts";
-import { type IEvent, type IStateEventWithRoomId, type IStoredClientOpts, type ISyncResponse } from "../matrix.ts";
+import {
+    type IEvent,
+    type IStateEvent,
+    type IStateEventWithRoomId,
+    type IStoredClientOpts,
+    type ISyncResponse,
+} from "../matrix.ts";
 import { type IndexedToDeviceBatch, type ToDeviceBatchWithTxnId } from "../models/ToDeviceMessage.ts";
 import { type SyncUserProfile } from "../models/user.ts";
+import { type CachedTimelineChunk, type SavedSyncTrim } from "../sync-accumulator.ts";
 
 export interface IIndexedDBBackend {
     connect(onClose?: () => void): Promise<void>;
     syncToDatabase(userTuples: UserTuple[]): Promise<void>;
     isNewlyCreated(): Promise<boolean>;
     setSyncData(syncData: ISyncResponse): Promise<void>;
-    getSavedSync(): Promise<ISavedSync | null>;
+    getSavedSync(copy?: boolean, trim?: SavedSyncTrim): Promise<ISavedSync | null>;
+    getCachedTimelineBefore(roomId: string, eventId: string): Promise<CachedTimelineChunk | null>;
+    getCachedRoomState(roomId: string): Promise<IStateEvent[] | null>;
     getNextBatchToken(): Promise<string>;
     clearDatabase(): Promise<void>;
     getOutOfBandMembers(roomId: string): Promise<IStateEventWithRoomId[] | null>;

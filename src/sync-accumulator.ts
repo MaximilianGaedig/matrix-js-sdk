@@ -217,12 +217,14 @@ export enum Category {
     Knock = "knock",
 }
 
+interface TimelineEntry {
+    event: IRoomEvent | IStateEvent;
+    token: string | null;
+}
+
 interface IRoom {
     _currentState: { [eventType: string]: { [stateKey: string]: IStateEvent } };
-    _timeline: {
-        event: IRoomEvent | IStateEvent;
-        token: string | null;
-    }[];
+    _timeline: TimelineEntry[];
     _summary: Partial<IRoomSummary>;
     _accountData: { [eventType: string]: IMinimalEvent };
     _unreadNotifications: Partial<UnreadNotificationCounts>;
@@ -627,7 +629,7 @@ export class SyncAccumulator {
      * /sync response from the 'rooms' key onwards. The "accountData" key is
      * a list of raw events which represent global account data.
      */
-    public getJSON(forDatabase = false): ISyncData {
+    public getJSON(forDatabase = false, trim?: SavedSyncTrim): ISyncData {
         const data: IRooms = {
             join: {},
             invite: {},
@@ -657,6 +659,7 @@ export class SyncAccumulator {
                 // We track both `state` and `state_after` for downgrade compatibility
                 "state": IState;
                 "org.matrix.msc4222.state_after": IState;
+                [STATE_TRIMMED_KEY]?: boolean;
             } = {
                 "ephemeral": { events: [] },
                 "account_data": { events: [] },
@@ -687,8 +690,29 @@ export class SyncAccumulator {
                 roomJson.ephemeral.events.push(receiptEvent);
             }
 
-            // Add timeline data
-            roomData._timeline.forEach((msgData) => {
+            // Add timeline data. When trimming, the replay gets only the room's latest events; the ones
+            // before sit behind a local pagination token (see getCachedTimelineBefore).
+            const trimRoom = !!trim && !this.isReplayedInFull(roomId, roomData, trim);
+            let entries = roomData._timeline;
+            if (trimRoom) {
+                if (trim.skipTimelineTypes?.length) {
+                    const skip = new Set(trim.skipTimelineTypes);
+                    entries = entries.filter((entry) => !skip.has(entry.event.type));
+                }
+                const start = trimmedTimelineStart(entries, trim.tail);
+                if (start > 0) {
+                    entries = entries.slice(start);
+                }
+                // Wherever the replay now starts, the room must be able to reach what came before it. A
+                // room whose stored events were all left out (a quiet chat whose only recent events were
+                // a bridge's bookkeeping) would otherwise replay nothing and have nothing to paginate
+                // from, leaving it stuck showing an empty timeline.
+                const first = entries[0] ?? roomData._timeline[roomData._timeline.length - 1];
+                if (first) {
+                    roomJson.timeline.prev_batch = LOCAL_PAGINATION_PREFIX + first.event.event_id;
+                }
+            }
+            entries.forEach((msgData) => {
                 if (!roomJson.timeline.prev_batch) {
                     // the first event we add to the timeline MUST match up to
                     // the prev_batch token.
@@ -697,28 +721,7 @@ export class SyncAccumulator {
                     }
                     roomJson.timeline.prev_batch = msgData.token;
                 }
-
-                let transformedEvent: (IRoomEvent | IStateEvent) & { _localTs?: number };
-                if (!forDatabase && isTaggedEvent(msgData.event)) {
-                    // This means we have to copy each event, so we can fix it up to
-                    // set a correct 'age' parameter whilst keeping the local timestamp
-                    // on our stored event. If this turns out to be a bottleneck, it could
-                    // be optimised either by doing this in the main process after the data
-                    // has been structured-cloned to go between the worker & main process,
-                    // or special-casing data from saved syncs to read the local timestamp
-                    // directly rather than turning it into age to then immediately be
-                    // transformed back again into a local timestamp.
-                    transformedEvent = Object.assign({}, msgData.event);
-                    if (transformedEvent.unsigned !== undefined) {
-                        transformedEvent.unsigned = Object.assign({}, transformedEvent.unsigned);
-                    }
-                    delete transformedEvent._localTs;
-                    transformedEvent.unsigned = transformedEvent.unsigned || {};
-                    transformedEvent.unsigned.age = Date.now() - msgData.event._localTs!;
-                } else {
-                    transformedEvent = msgData.event;
-                }
-                roomJson.timeline.events.push(transformedEvent);
+                roomJson.timeline.events.push(exportTimelineEvent(msgData, forDatabase));
             });
 
             // Add state data: roll back current state to the start of timeline,
@@ -747,12 +750,17 @@ export class SyncAccumulator {
                 }
                 setState(rollBackState, prevStateEvent);
             }
+            // A replay is built from `state_after` alone, so the rolled-back copy of the same state is
+            // only worth producing for storage, where it is kept for downgrade compatibility. Sending
+            // it to the client as well doubles the state it has to clone and turn into events.
+            const withRolledBackState = forDatabase || !trim;
             Object.keys(roomData._currentState).forEach((evType) => {
                 Object.keys(roomData._currentState[evType]).forEach((stateKey) => {
                     let ev = roomData._currentState[evType][stateKey];
                     // Push to both fields to provide downgrade compatibility in the sync accumulator db
                     // the code will prefer `state_after` if it is present
                     roomJson["org.matrix.msc4222.state_after"].events.push(ev);
+                    if (!withRolledBackState) return;
                     // Roll the state back to the value at the start of the timeline if it was changed
                     if (rollBackState[evType] && rollBackState[evType][stateKey]) {
                         ev = rollBackState[evType][stateKey];
@@ -760,6 +768,14 @@ export class SyncAccumulator {
                     roomJson.state.events.push(ev);
                 });
             });
+            if (trimRoom && trim.listStateTypes) {
+                const keep = this.listStateFilter(roomId, roomData, roomJson.timeline.events, trim);
+                const before = roomJson.state.events.length;
+                roomJson.state.events = roomJson.state.events.filter(keep);
+                roomJson["org.matrix.msc4222.state_after"].events =
+                    roomJson["org.matrix.msc4222.state_after"].events.filter(keep);
+                if (roomJson.state.events.length < before) roomJson[STATE_TRIMMED_KEY] = true;
+            }
             data.join[roomId] = roomJson;
         });
 
@@ -776,6 +792,59 @@ export class SyncAccumulator {
         };
     }
 
+    /** Whether a trimmed replay still gives this room in full: the room about to be shown, or a favourite. */
+    private isReplayedInFull(roomId: string, roomData: IRoom, trim: SavedSyncTrim): boolean {
+        if (trim.fullRoomIds?.includes(roomId)) return true;
+        const tags = (roomData._accountData["m.tag"]?.content as { tags?: Record<string, unknown> } | undefined)?.tags;
+        return !!tags && !!trim.fullRoomTags?.some((tag) => tag in tags);
+    }
+
+    /**
+     * Which state a trimmed room keeps in memory: the types the room list needs, and the member events of
+     * the user, the room's heroes, its DM partner and the senders of the replayed events.
+     */
+    private listStateFilter(
+        roomId: string,
+        roomData: IRoom,
+        timeline: (IRoomEvent | IStateEvent)[],
+        trim: SavedSyncTrim,
+    ): (ev: IStateEvent) => boolean {
+        const types = new Set(trim.listStateTypes);
+        const members = new Set<string>(roomData._summary["m.heroes"] ?? []);
+        if (trim.userId) members.add(trim.userId);
+        for (const ev of timeline) members.add(ev.sender);
+        const direct = this.accountData["m.direct"]?.content as Record<string, unknown> | undefined;
+        for (const [userId, rooms] of Object.entries(direct ?? {})) {
+            if (Array.isArray(rooms) && rooms.includes(roomId)) members.add(userId);
+        }
+        return (ev) => (ev.type === "m.room.member" ? members.has(ev.state_key) : types.has(ev.type));
+    }
+
+    /** A room's whole stored current state: what a trimmed replay left out of memory (see SavedSyncTrim). */
+    public getCachedRoomState(roomId: string): IStateEvent[] | null {
+        const state = this.joinRooms[roomId]?._currentState;
+        if (!state) return null;
+        return Object.values(state).flatMap((byKey) => Object.values(byKey));
+    }
+
+    /**
+     * The stored timeline of a room before one of its events: what a trimmed replay left out (see
+     * {@link SavedSyncTrim}), with the pagination token to continue from after it. Null when the room
+     * isn't stored; no events when the event has since been pruned from the store.
+     */
+    public getCachedTimelineBefore(roomId: string, eventId: string): CachedTimelineChunk | null {
+        const timeline = this.joinRooms[roomId]?._timeline;
+        if (!timeline?.length) return null;
+        const index = timeline.findIndex((e) => e.event.event_id === eventId);
+        // Pruned: the stored window now starts later, so continue from its start (duplicates are dropped).
+        const before = index > 0 ? timeline.slice(0, index) : [];
+        const first = index > 0 ? timeline[0] : timeline.find((e) => e.token);
+        return {
+            events: before.map((msgData) => exportTimelineEvent(msgData, false)),
+            prevBatch: first?.token ?? null,
+        };
+    }
+
     public getNextBatchToken(): string {
         return this.nextBatch!;
     }
@@ -788,6 +857,73 @@ export class SyncAccumulator {
             (ev) => !eventIds.includes(ev.event.event_id),
         );
     }
+}
+
+/** How much of the stored sync to replay at startup: see {@link SyncAccumulator#getJSON}. */
+export interface SavedSyncTrim {
+    /** Each room's latest events to replay (more when needed to include a message). */
+    tail: number;
+    /** Rooms replayed in full (the one about to be shown). */
+    fullRoomIds?: string[];
+    /** Rooms with any of these tags (m.tag) are replayed in full too, e.g. favourites. */
+    fullRoomTags?: string[];
+    /**
+     * Keep only these state types (and a few member events) for the other rooms; the rest of their state
+     * stays in the store until {@link MatrixClient#loadStoredRoomState}. Unset keeps all state.
+     */
+    listStateTypes?: string[];
+    /** The user's own ID, whose member event every room keeps. */
+    userId?: string;
+    /**
+     * Event types left out of the replayed timeline of a trimmed room. Bookkeeping state a bridge keeps
+     * up to date (import progress, connection state) is rewritten constantly and is only ever read as
+     * current state, so replaying it wastes the room's few kept events and the memory they take. The
+     * state itself is unaffected: list it in {@link listStateTypes} to keep that.
+     */
+    skipTimelineTypes?: string[];
+}
+
+/** Marks a replayed room whose state was trimmed (see {@link SavedSyncTrim.listStateTypes}). */
+export const STATE_TRIMMED_KEY = "mx_state_trimmed";
+
+export interface CachedTimelineChunk {
+    /** Chronological. */
+    events: (IRoomEvent | IStateEvent)[];
+    /** Where the server continues before these events. */
+    prevBatch: string | null;
+}
+
+/** Marks a pagination token as "the stored timeline before this event ID" rather than a server token. */
+export const LOCAL_PAGINATION_PREFIX = "mx_stored_before:";
+
+/** Event types a room preview shows: the tail must reach back to one of these. */
+const PREVIEW_TYPES = new Set(["m.room.message", "m.room.encrypted", "m.sticker", "m.poll.start", "org.matrix.msc3381.poll.start", "m.call.invite"]);
+const MAX_TAIL_EXTENSION = 10;
+
+function trimmedTimelineStart(timeline: TimelineEntry[], tail: number): number {
+    const start = Math.max(0, timeline.length - tail);
+    // Reach back a little for a message the room list can preview; a room with none nearby (only
+    // membership and setup events) keeps just its tail.
+    const limit = Math.max(0, start - MAX_TAIL_EXTENSION);
+    for (let i = timeline.length - 1; i >= limit; i--) {
+        if (PREVIEW_TYPES.has(timeline[i].event.type)) return Math.min(i, start);
+    }
+    return start;
+}
+
+function exportTimelineEvent(msgData: TimelineEntry, forDatabase: boolean): IRoomEvent | IStateEvent {
+    if (forDatabase || !isTaggedEvent(msgData.event)) return msgData.event;
+    // This means we have to copy each event, so we can fix it up to
+    // set a correct 'age' parameter whilst keeping the local timestamp
+    // on our stored event.
+    const transformedEvent: (IRoomEvent | IStateEvent) & { _localTs?: number } = Object.assign({}, msgData.event);
+    if (transformedEvent.unsigned !== undefined) {
+        transformedEvent.unsigned = Object.assign({}, transformedEvent.unsigned);
+    }
+    delete transformedEvent._localTs;
+    transformedEvent.unsigned = transformedEvent.unsigned || {};
+    transformedEvent.unsigned.age = Date.now() - msgData.event._localTs!;
+    return transformedEvent;
 }
 
 function setState(eventMap: Record<string, Record<string, IStateEvent>>, event: IRoomEvent | IStateEvent): void {

@@ -3132,7 +3132,10 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
                 threadId = "",
             } = this.eventShouldLiveIn(event, neighbouringEvents, threadRoots);
 
-            if (!shouldLiveInThread && !shouldLiveInRoom && event.isRelation()) {
+            // Replaying the cached sync must not wait on the network (the same parents would be fetched
+            // one by one on every start, and offline each fetch fails anyway): an unknown parent leaves the
+            // relation aggregated but out of both timelines, as when the fetch fails.
+            if (!shouldLiveInThread && !shouldLiveInRoom && event.isRelation() && !fromCache) {
                 try {
                     const parentEvent = new MatrixEvent(
                         await this.client.fetchRoomEvent(this.roomId, event.relationEventId!),

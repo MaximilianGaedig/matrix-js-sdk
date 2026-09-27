@@ -82,7 +82,13 @@ export class IndexedDBStoreWorker {
                 prom = this.backend?.clearDatabase();
                 break;
             case "getSavedSync":
-                prom = this.backend?.getSavedSync(false);
+                prom = this.backend?.getSavedSync(false, msg.args?.[0]);
+                break;
+            case "getCachedRoomState":
+                prom = this.backend?.getCachedRoomState(msg.args[0]);
+                break;
+            case "getCachedTimelineBefore":
+                prom = this.backend?.getCachedTimelineBefore(msg.args[0], msg.args[1]);
                 break;
             case "setSyncData":
                 prom = this.backend?.setSyncData(msg.args[0]);
