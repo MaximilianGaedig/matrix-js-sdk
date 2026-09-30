@@ -192,13 +192,16 @@ export class User extends TypedEventEmitter<UserEvent, UserEventHandlerMap> {
      * "User.avatarUrl" and/or "User.displayName" if this event updates this user's
      * properties.
      * @param event - The `m.presence` event.
+     * @param receivedTs - When the event arrived. Its `last_active_ago` counts back from that moment, so an
+     *   event replayed from a store must be given the time it originally arrived: stamping it with the time of
+     *   the replay makes everyone who was last seen hours ago look as if they were active when the app opened.
      *
      * @remarks
      * Fires {@link UserEvent.Presence}
      * Fires {@link UserEvent.DisplayName}
      * Fires {@link UserEvent.AvatarUrl}
      */
-    public setPresenceEvent(event: MatrixEvent): void {
+    public setPresenceEvent(event: MatrixEvent, receivedTs = Date.now()): void {
         if (event.getType() !== "m.presence") {
             return;
         }
@@ -235,7 +238,7 @@ export class User extends TypedEventEmitter<UserEvent, UserEventHandlerMap> {
             this.avatarUrl = event.getContent().avatar_url;
         }
         this.lastActiveAgo = event.getContent().last_active_ago;
-        this.lastPresenceTs = Date.now();
+        this.lastPresenceTs = receivedTs;
         this.currentlyActive = event.getContent().currently_active;
 
         this.updateModifiedTime();

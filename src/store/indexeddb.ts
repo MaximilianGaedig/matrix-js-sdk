@@ -58,6 +58,9 @@ type EventHandlerMap = {
     closed: () => void;
 };
 
+/** Where a stored presence event keeps the time it arrived, in its local-only `unsigned` data. */
+export const PRESENCE_RECEIVED_TS = "org.matrix.js-sdk.received_ts";
+
 export class IndexedDBStore extends MemoryStore {
     public static exists(indexedDB: IDBFactory, dbName: string): Promise<boolean> {
         return LocalIndexedDBStoreBackend.exists(indexedDB, dbName);
@@ -161,7 +164,14 @@ export class IndexedDBStore extends MemoryStore {
                     }
                     const u = this.createUser(userId);
                     if (rawEvent) {
-                        u.setPresenceEvent(new MatrixEvent(rawEvent));
+                        /*
+                         * The stored event's last_active_ago was measured when it arrived, which may be days
+                         * ago. An event saved before the arrival time was kept has no way to say when that
+                         * was, so it gets 0: its presence state still applies, but no "last active" time
+                         * is derived from it until a live event replaces it.
+                         */
+                        const receivedTs = rawEvent.unsigned?.[PRESENCE_RECEIVED_TS];
+                        u.setPresenceEvent(new MatrixEvent(rawEvent), typeof receivedTs === "number" ? receivedTs : 0);
                     }
                     this.userModifiedMap[u.userId] = u.getLastModifiedTime();
                     this.storeUser(u);
@@ -278,7 +288,12 @@ export class IndexedDBStore extends MemoryStore {
             if (this.userModifiedMap[u.userId] === u.getLastModifiedTime()) continue;
             if (!u.events.presence) continue;
 
-            userTuples.push([u.userId, u.events.presence.event]);
+            // Kept with the event, so a replay can count last_active_ago back from when it really arrived.
+            const event = u.events.presence.event;
+            userTuples.push([
+                u.userId,
+                { ...event, unsigned: { ...event.unsigned, [PRESENCE_RECEIVED_TS]: u.lastPresenceTs } },
+            ]);
 
             // note that we've saved this version of the user
             this.userModifiedMap[u.userId] = u.getLastModifiedTime();
