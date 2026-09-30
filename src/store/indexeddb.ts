@@ -57,6 +57,9 @@ type EventHandlerMap = {
     closed: () => void;
 };
 
+/** Key in a stored presence event's `unsigned` holding the time the event was received. */
+export const PRESENCE_RECEIVED_TS = "org.matrix.js-sdk.received_ts";
+
 export class IndexedDBStore extends MemoryStore {
     public static exists(indexedDB: IDBFactory, dbName: string): Promise<boolean> {
         return LocalIndexedDBStoreBackend.exists(indexedDB, dbName);
@@ -160,7 +163,10 @@ export class IndexedDBStore extends MemoryStore {
                     }
                     const u = this.createUser(userId);
                     if (rawEvent) {
-                        u.setPresenceEvent(new MatrixEvent(rawEvent));
+                        // `last_active_ago` is relative to when the event was received, not to now. Events
+                        // stored without that time get 0, so no last active time is derived from them.
+                        const receivedTs = rawEvent.unsigned?.[PRESENCE_RECEIVED_TS];
+                        u.setPresenceEvent(new MatrixEvent(rawEvent), typeof receivedTs === "number" ? receivedTs : 0);
                     }
                     this.userModifiedMap[u.userId] = u.getLastModifiedTime();
                     this.storeUser(u);
@@ -257,7 +263,11 @@ export class IndexedDBStore extends MemoryStore {
             if (this.userModifiedMap[u.userId] === u.getLastModifiedTime()) continue;
             if (!u.events.presence) continue;
 
-            userTuples.push([u.userId, u.events.presence.event]);
+            const event = u.events.presence.event;
+            userTuples.push([
+                u.userId,
+                { ...event, unsigned: { ...event.unsigned, [PRESENCE_RECEIVED_TS]: u.lastPresenceTs } },
+            ]);
 
             // note that we've saved this version of the user
             this.userModifiedMap[u.userId] = u.getLastModifiedTime();

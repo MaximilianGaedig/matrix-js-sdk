@@ -192,13 +192,15 @@ export class User extends TypedEventEmitter<UserEvent, UserEventHandlerMap> {
      * "User.avatarUrl" and/or "User.displayName" if this event updates this user's
      * properties.
      * @param event - The `m.presence` event.
+     * @param receivedTs - When the event was received. `last_active_ago` is relative to this, so events
+     *   restored from a store should pass the time they were originally received. Defaults to now.
      *
      * @remarks
      * Fires {@link UserEvent.Presence}
      * Fires {@link UserEvent.DisplayName}
      * Fires {@link UserEvent.AvatarUrl}
      */
-    public setPresenceEvent(event: MatrixEvent): void {
+    public setPresenceEvent(event: MatrixEvent, receivedTs = Date.now()): void {
         if (event.getType() !== "m.presence") {
             return;
         }
@@ -235,7 +237,7 @@ export class User extends TypedEventEmitter<UserEvent, UserEventHandlerMap> {
             this.avatarUrl = event.getContent().avatar_url;
         }
         this.lastActiveAgo = event.getContent().last_active_ago;
-        this.lastPresenceTs = Date.now();
+        this.lastPresenceTs = receivedTs;
         this.currentlyActive = event.getContent().currently_active;
 
         this.updateModifiedTime();

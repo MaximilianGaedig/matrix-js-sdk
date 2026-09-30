@@ -21,7 +21,7 @@ limitations under the License.
 import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
 
-import { IndexedDBStore, type IStateEventWithRoomId, MemoryStore, User, UserEvent } from "../../../src";
+import { IndexedDBStore, type IStateEventWithRoomId, MatrixEvent, MemoryStore, User, UserEvent } from "../../../src";
 import { emitPromise } from "../../test-utils/test-utils";
 import { LocalIndexedDBStoreBackend } from "../../../src/store/indexeddb-local-backend";
 import { RemoteIndexedDBStoreBackend } from "../../../src/store/indexeddb-remote-backend";
@@ -190,6 +190,71 @@ describe("IndexedDBStore", () => {
         await store.startup();
         expect(userCreated).toBe(true);
         expect(presenceEventEmitted).toBe(true);
+    });
+
+    it("should restore the time a presence event was received", async () => {
+        const indexedDB = new IDBFactory();
+        const creator = (id: string) => new User(id);
+        const arrived = Date.now() - 3 * 60 * 60 * 1000;
+        const agoWhenArrived = 5_000;
+
+        const first = new IndexedDBStore({ indexedDB, dbName: "presence-ts", localStorage });
+        first.setUserCreator(creator);
+        await first.startup();
+        const alice = new User("@alice:example.org");
+        alice.setPresenceEvent(
+            new MatrixEvent({
+                type: "m.presence",
+                sender: "@alice:example.org",
+                content: { presence: "offline", last_active_ago: agoWhenArrived },
+            }),
+            arrived,
+        );
+        first.storeUser(alice);
+        await first.save(true);
+        await first.destroy();
+
+        const second = new IndexedDBStore({ indexedDB, dbName: "presence-ts", localStorage });
+        second.setUserCreator(creator);
+        await second.startup();
+        const replayed = second.getUser("@alice:example.org")!;
+        expect(replayed.lastPresenceTs).toBe(arrived);
+        expect(replayed.getLastActiveTs()).toBe(arrived - agoWhenArrived);
+    });
+
+    it("should not derive a last active time from a stored presence event without a received time", async () => {
+        const indexedDB = new IDBFactory();
+        const setup = Promise.withResolvers<Event>();
+        const req = indexedDB.open("matrix-js-sdk:legacy-presence", 1);
+        req.onupgradeneeded = () => {
+            const db = req.result;
+            db.createObjectStore("users", { keyPath: ["userId"] });
+            db.createObjectStore("accountData", { keyPath: ["type"] });
+            db.createObjectStore("sync", { keyPath: ["clobber"] });
+        };
+        req.onsuccess = setup.resolve;
+        await setup.promise;
+        const written = Promise.withResolvers<Event>();
+        req.result
+            .transaction(["users"], "readwrite")
+            .objectStore("users")
+            .put({
+                userId: "@bob:example.org",
+                event: {
+                    type: "m.presence",
+                    sender: "@bob:example.org",
+                    content: { presence: "offline", last_active_ago: 1212 },
+                },
+            }).onsuccess = written.resolve;
+        await written.promise;
+        req.result.close();
+
+        const store = new IndexedDBStore({ indexedDB, dbName: "legacy-presence", localStorage });
+        store.setUserCreator((id: string) => new User(id));
+        await store.startup();
+        const bob = store.getUser("@bob:example.org")!;
+        expect(bob.presence).toBe("offline");
+        expect(bob.lastPresenceTs).toBe(0);
     });
 
     it("should use MemoryStore methods for pending events if no localStorage", async () => {
