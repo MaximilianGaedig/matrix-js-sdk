@@ -473,5 +473,22 @@ describe("TimelineWindow", function () {
             // And the unaffected one is not
             expect(idsOf(oldWindow.getEvents())).toEqual(idsOf([e5, e4, e3]));
         });
+
+        it("should never return undefined entries when its indices run past the timeline", function () {
+            // Given a window over the live end of a room
+            const room = new Room(ROOM_ID, mockClient, USER_ID, { timelineSupport: true });
+            const timelineSet = room.getUnfilteredTimelineSet();
+            const events = createEvents(5);
+            room.addLiveEvents(events, { addToState: false });
+            const window = new TimelineWindow(mockClient, timelineSet);
+            window.load(undefined, 10);
+
+            // When its end index is left pointing past the last event - as happens when events are removed
+            // from the timeline in ways its removal listener does not account for (cancelling unsent events)
+            (window as any).end.index += 2;
+
+            // Then it still returns only real events
+            expect(idsOf(window.getEvents())).toEqual(idsOf(events));
+        });
     });
 });

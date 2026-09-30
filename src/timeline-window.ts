@@ -413,6 +413,10 @@ export class TimelineWindow {
             if (timeline === this.end?.timeline) {
                 endIndex = this.end.index + timeline.getBaseIndex();
             }
+            // The window's indices are not moved when an event is removed from the timeline (as cancelling an
+            // unsent event does), so they can point past its end; reading there returned undefined "events".
+            startIndex = Math.max(0, startIndex);
+            endIndex = Math.min(events.length, endIndex);
 
             for (let i = startIndex; i < endIndex; i++) {
                 result.push(events[i]);
