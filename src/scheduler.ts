@@ -22,7 +22,7 @@ import { logger } from "./logger.ts";
 import { type MatrixEvent } from "./models/event.ts";
 import { EventType } from "./@types/event.ts";
 import { removeElement } from "./utils.ts";
-import { calculateRetryBackoff, type MatrixError } from "./http-api/index.ts";
+import { calculateRetryBackoff, type MatrixError, SendTimeoutError } from "./http-api/index.ts";
 import { type ISendEventResponse } from "./@types/requests.ts";
 
 const DEBUG = false; // set true to enable console logging.
@@ -47,7 +47,9 @@ export class MatrixScheduler<T = ISendEventResponse> {
      * @see retryAlgorithm
      */
     public static RETRY_BACKOFF_RATELIMIT(event: MatrixEvent | null, attempts: number, err: MatrixError): number {
-        return calculateRetryBackoff(err, attempts, false);
+        // A send that timed out is retried, since it most likely went into a dead connection and the
+        // transaction ID makes repeating it safe; other connection errors are not.
+        return calculateRetryBackoff(err, attempts, err instanceof SendTimeoutError);
     }
 
     /**

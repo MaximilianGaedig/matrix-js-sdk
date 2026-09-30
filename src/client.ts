@@ -74,6 +74,7 @@ import {
     MediaPrefix,
     Method,
     retryNetworkOperation,
+    SendTimeoutError,
     type TokenRefreshCallback,
     type Upload,
     type UploadOpts,
@@ -267,6 +268,9 @@ export type Store = IStore;
 export type ResetTimelineCallback = (roomId: string) => boolean;
 
 const SCROLLBACK_DELAY_MS = 3000;
+
+/** How long a request to send an event may go without an answer before it is abandoned (and retried). */
+export const SEND_EVENT_TIMEOUT_MS = 20_000;
 
 const TURN_CHECK_INTERVAL = 10 * 60 * 1000; // poll for turn credentials every 10 minutes
 
@@ -3177,10 +3181,20 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                 content,
             );
         } else {
-            return this.http.authedRequest<ISendEventResponse>(Method.Put, path, queryOpts, content).then((res) => {
-                this.logger.debug(`Event sent to ${event.getRoomId()} with event id ${res.event_id}`);
-                return res;
-            });
+            // Without a timeout, a send written into a connection that had silently died waited forever - and
+            // every message queued behind it, in every room, waited with it. See SendTimeoutError.
+            const timeout = AbortSignal.timeout(SEND_EVENT_TIMEOUT_MS);
+            return this.http
+                .authedRequest<ISendEventResponse>(Method.Put, path, queryOpts, content, { abortSignal: timeout })
+                .then(
+                    (res) => {
+                        this.logger.debug(`Event sent to ${event.getRoomId()} with event id ${res.event_id}`);
+                        return res;
+                    },
+                    (e) => {
+                        throw timeout.aborted ? new SendTimeoutError(e) : e;
+                    },
+                );
         }
     }
 

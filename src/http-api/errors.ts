@@ -219,6 +219,23 @@ export class ConnectionError extends Error {
 }
 
 /**
+ * A request to send an event that got no answer in time.
+ *
+ * Distinct from other connection errors because it is safe to retry: the transaction ID makes a repeat of the
+ * same send a no-op on the server, and a request that got no answer at all was most likely written into a
+ * connection that had already died (after sleep or a network change), which a fresh attempt does not reuse.
+ */
+export class SendTimeoutError extends ConnectionError {
+    public constructor(cause?: Error) {
+        super("event send timed out", cause);
+    }
+
+    public get name(): string {
+        return "SendTimeoutError";
+    }
+}
+
+/**
  * Construct a TokenRefreshError. This indicates that a request failed due to the token being expired,
  * and attempting to refresh said token also failed but in a way which was not indicative of token invalidation.
  * Assumed to be a temporary failure.
