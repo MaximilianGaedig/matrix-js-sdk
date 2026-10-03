@@ -17,7 +17,7 @@ limitations under the License.
 import type { SyncCryptoCallbacks } from "./common-crypto/CryptoBackend.ts";
 import { NotificationCountType, Room, RoomEvent } from "./models/room.ts";
 import { logger } from "./logger.ts";
-import { promiseMapSeries } from "./utils.ts";
+import { promiseMapSeries, sleep } from "./utils.ts";
 import { EventTimeline } from "./models/event-timeline.ts";
 import { ClientEvent, type IStoredClientOpts, type MatrixClient } from "./client.ts";
 import {
@@ -421,6 +421,28 @@ class ExtensionStickyEvents implements Extension<ExtensionStickyEventsRequest, E
  * A copy of SyncApi such that it can be used as a drop-in replacement for sync v2. For the actual
  * sliding sync API, see sliding-sync.ts or the class SlidingSync.
  */
+/**
+ * What a session keeps of sliding sync for the next one: each room as the server last described it, and
+ * the account data. Shown on startup before any request is made.
+ */
+export interface SlidingSyncSnapshot {
+    rooms: Record<string, MSC3575RoomData>;
+    accountData: ExtensionAccountDataResponse;
+}
+
+/**
+ * Where a client keeps its {@link SlidingSyncSnapshot}s. `loadFirst` is what the first screen needs (the rooms
+ * at the top of the list, and the account data), read and shown before anything else; `loadRest` is every
+ * other room, shown after in small batches so that the first screen is not held up by rooms nobody sees yet.
+ */
+export interface SlidingSyncCache {
+    loadFirst(): Promise<SlidingSyncSnapshot | null>;
+    loadRest(): Promise<Record<string, MSC3575RoomData> | null>;
+}
+
+/** How many cached rooms are replayed between yields, once the first screen is up. */
+const CACHE_REPLAY_BATCH = 50;
+
 export class SlidingSyncSdk {
     private readonly opts: IStoredClientOpts;
     private readonly syncOpts: SyncApiOptions;
@@ -429,6 +451,11 @@ export class SlidingSyncSdk {
     private lastPos: string | null = null;
     private failCount = 0;
     private notifEvents: MatrixEvent[] = []; // accumulator of sync events in the current sync response
+    private readonly accountData: ExtensionAccountData;
+    /** Rooms shown from the cache whose live data has not arrived yet. */
+    private readonly fromCache = new Set<string>();
+    /** Prepared was announced from the cache: the first live response is not a first sync any more. */
+    private preparedFromCache = false;
 
     public constructor(
         private readonly slidingSync: SlidingSync,
@@ -448,9 +475,10 @@ export class SlidingSyncSdk {
         // The `e2ee` and `to_device` extensions feed a shared collector, so that the crypto layer sees all the
         // encryption-relevant data from a response in a single call.
         const e2eeCollector = new E2EESyncChangesCollector(this.client, this.syncOpts.cryptoCallbacks);
+        this.accountData = new ExtensionAccountData(this.client);
         const extensions: Extension<any, any>[] = [
             new ExtensionToDevice(e2eeCollector),
-            new ExtensionAccountData(this.client),
+            this.accountData,
             new ExtensionTyping(this.client),
             new ExtensionReceipts(this.client),
             new ExtensionStickyEvents(this.client),
@@ -464,6 +492,21 @@ export class SlidingSyncSdk {
     }
 
     private async onRoomData(roomId: string, roomData: MSC3575RoomData): Promise<void> {
+        if (this.fromCache.delete(roomId)) {
+            const room = this.client.store.getRoom(roomId);
+            // What the cache showed may be some way behind: when none of what has arrived is in it, there is
+            // a gap between the two, and the cached events are let go rather than shown next to the new ones.
+            if (room && roomData.limited && roomData.timeline?.length) {
+                const known = new Set(room.getLiveTimeline().getEvents().map((event) => event.getId()));
+                if (!roomData.timeline.some((event) => known.has(event.event_id))) {
+                    room.resetLiveTimeline(roomData.prev_batch ?? null, null);
+                }
+            }
+        }
+        await this.applyRoomData(roomId, roomData);
+    }
+
+    private async applyRoomData(roomId: string, roomData: MSC3575RoomData): Promise<void> {
         let room = this.client.store.getRoom(roomId);
         if (!room) {
             if (!roomData.initial) {
@@ -490,7 +533,8 @@ export class SlidingSyncSdk {
                     break;
                 }
                 // Element won't stop showing the initial loading spinner unless we fire SyncState.Prepared
-                if (!this.lastPos) {
+                // (which the cache may already have done)
+                if (!this.lastPos && !this.preparedFromCache) {
                     this.updateSyncState(SyncState.Prepared, {
                         oldSyncToken: undefined,
                         nextSyncToken: resp.pos,
@@ -986,25 +1030,104 @@ export class SlidingSyncSdk {
     public async sync(): Promise<void> {
         this.syncOpts.logger.debug("Sliding sync init loop");
 
+        //   0) Show what the last session had, before any request: the first screen at once, offline too. The
+        //      rest of the cached rooms follow in small batches while the live sync gets going.
+        const rest = await this.replayCache();
+
         //   1) We need to get push rules so we can check if events should bing as we get
-        //      them from /sync.
-        while (!this.client.isGuest()) {
-            try {
-                this.syncOpts.logger.debug("Getting push rules...");
-                const result = await this.client.getPushRules();
-                this.syncOpts.logger.debug("Got push rules");
-                this.client.pushRules = result;
-                break;
-            } catch (err) {
-                this.syncOpts.logger.error("Getting push rules failed", err);
-                if (this.shouldAbortSync(<MatrixError>err)) {
-                    return;
+        //      them from /sync. With the cache's there is nothing to wait for: they are refreshed alongside.
+        const fetchPushRules = async (): Promise<boolean> => {
+            for (let attempt = 0; !this.client.isGuest(); attempt++) {
+                try {
+                    this.syncOpts.logger.debug("Getting push rules...");
+                    const result = await this.client.getPushRules();
+                    this.syncOpts.logger.debug("Got push rules");
+                    this.client.pushRules = result;
+                    return true;
+                } catch (err) {
+                    this.syncOpts.logger.error("Getting push rules failed", err);
+                    if (this.shouldAbortSync(<MatrixError>err)) {
+                        return false;
+                    }
+                    // Not straight back: offline, that spun as fast as the request could fail.
+                    await sleep(Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5)));
                 }
             }
+            return true;
+        };
+        if (this.preparedFromCache && this.client.pushRules) {
+            void fetchPushRules();
+        } else if (!(await fetchPushRules())) {
+            return;
         }
 
         // start syncing
-        await this.slidingSync.start();
+        const started = this.slidingSync.start();
+        await rest;
+        await started;
+    }
+
+    /**
+     * Shows the cached first screen and announces the client prepared; returns the replay of the remaining
+     * rooms, which runs on in small batches while the first live request is made.
+     */
+    private async replayCache(): Promise<Promise<void>> {
+        const cache = this.opts.slidingSyncCache;
+        if (!cache || this.lastPos) return Promise.resolve();
+        let first: SlidingSyncSnapshot | null = null;
+        try {
+            first = await cache.loadFirst();
+        } catch (err) {
+            this.syncOpts.logger.warn("Sliding sync: could not read the cache", err);
+        }
+        if (!first) return Promise.resolve();
+
+        await this.replayRooms(first.rooms);
+        await this.accountData.onResponse(first.accountData);
+        this.preparedFromCache = true;
+        this.updateSyncState(SyncState.Prepared, {
+            oldSyncToken: undefined,
+            nextSyncToken: undefined,
+            catchingUp: false,
+            fromCache: true,
+        });
+        return this.replayRest(cache, first);
+    }
+
+    private async replayRest(cache: SlidingSyncCache, first: SlidingSyncSnapshot): Promise<void> {
+        let rest: Record<string, MSC3575RoomData> | null = null;
+        try {
+            rest = await cache.loadRest();
+        } catch (err) {
+            this.syncOpts.logger.warn("Sliding sync: could not read the rest of the cache", err);
+        }
+        if (!rest) return;
+        // Rooms the live sync has already described are not replayed over that.
+        const entries = Object.entries(rest).filter(([roomId]) => !this.client.getRoom(roomId));
+        for (let i = 0; i < entries.length; i += CACHE_REPLAY_BATCH) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            await this.replayRooms(
+                Object.fromEntries(entries.slice(i, i + CACHE_REPLAY_BATCH).filter(([id]) => !this.client.getRoom(id))),
+            );
+        }
+        // Their account data (tags, read markers) arrived with the first snapshot, before the rooms existed.
+        const late = Object.fromEntries(
+            Object.entries(first.accountData.rooms ?? {}).filter(([roomId]) => rest![roomId]),
+        );
+        if (Object.keys(late).length) await this.accountData.onResponse({ global: [], rooms: late });
+    }
+
+    private async replayRooms(rooms: Record<string, MSC3575RoomData>): Promise<void> {
+        for (const [roomId, roomData] of Object.entries(rooms)) {
+            if (this.client.getRoom(roomId)) continue;
+            this.fromCache.add(roomId);
+            try {
+                await this.applyRoomData(roomId, { ...roomData, initial: true, num_live: 0 });
+            } catch (err) {
+                this.fromCache.delete(roomId);
+                this.syncOpts.logger.warn("Sliding sync: could not show cached room", roomId, err);
+            }
+        }
     }
 
     /**

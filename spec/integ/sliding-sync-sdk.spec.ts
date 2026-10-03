@@ -177,6 +177,122 @@ describe("SlidingSyncSdk", () => {
         });
     });
 
+    describe("the cache of an earlier session", () => {
+        const cachedRoom = "!cached:localhost";
+        const otherRoom = "!other:localhost";
+        const cachedEvent = (id: string): IRoomEvent => ({
+            type: EventType.RoomMessage,
+            content: { body: id, msgtype: "m.text" },
+            sender: selfUserId,
+            origin_server_ts: 1,
+            event_id: id,
+        });
+        const roomData = (events: IRoomEvent[]): MSC3575RoomData => ({
+            name: "Cached",
+            required_state: [mkOwnStateEvent(EventType.RoomCreate, { creator: selfUserId })],
+            timeline: events,
+            initial: true,
+        });
+        const cache = {
+            loadFirst: vi.fn(),
+            loadRest: vi.fn(),
+        };
+
+        beforeEach(() => {
+            cache.loadFirst.mockReset().mockResolvedValue({
+                rooms: { [cachedRoom]: roomData([cachedEvent("$a"), cachedEvent("$b")]) },
+                accountData: {
+                    global: [{ type: "m.push_rules", content: { global: {} } }],
+                    rooms: { [otherRoom]: [{ type: "m.tag", content: { tags: { "m.favourite": {} } } }] },
+                },
+            });
+            cache.loadRest.mockReset().mockResolvedValue({ [otherRoom]: roomData([cachedEvent("$z")]) });
+        });
+        afterEach(teardownClient);
+
+        it("is shown, and the client prepared, before any request is made", async () => {
+            await setupClient({ slidingSyncCache: cache });
+            const states: [SyncState, boolean | undefined][] = [];
+            let requestsWhenPrepared: number | undefined;
+            client!.on(ClientEvent.Sync, (state, _prev, data) => {
+                states.push([state, data?.fromCache]);
+                requestsWhenPrepared ??= httpBackend!.requests.length;
+            });
+
+            const syncing = sdk!.sync();
+            await vi.waitFor(() => expect(states[0]).toEqual([SyncState.Prepared, true]));
+
+            expect(client!.getRoom(cachedRoom)?.getLiveTimeline().getEvents().map((e) => e.getId())).toEqual(["$a", "$b"]);
+            expect(requestsWhenPrepared).toBe(0);
+            // the rest follow, with the account data that arrived before they existed
+            await vi.waitFor(() => expect(client!.getRoom(otherRoom)?.tags).toEqual({ "m.favourite": {} }));
+            await httpBackend!.flushAllExpected();
+            await syncing;
+            expect(mockSlidingSync!.start).toHaveBeenCalled();
+        });
+
+        it("is not announced as a first sync a second time when the live sync answers", async () => {
+            await setupClient({ slidingSyncCache: cache });
+            const prepared: (boolean | undefined)[] = [];
+            client!.on(ClientEvent.Sync, (state, _prev, data) => state === SyncState.Prepared && prepared.push(data?.fromCache));
+            const syncing = sdk!.sync();
+            await httpBackend!.flushAllExpected();
+            await syncing;
+
+            mockSlidingSync!.emit(SlidingSyncEvent.Lifecycle, SlidingSyncState.Complete, { pos: "1", lists: {}, rooms: {}, extensions: {} });
+
+            expect(prepared).toEqual([true]);
+        });
+
+        it("gives way to live events that carry on from it", async () => {
+            await setupClient({ slidingSyncCache: cache });
+            const syncing = sdk!.sync();
+            await httpBackend!.flushAllExpected();
+            await syncing;
+
+            mockSlidingSync!.emit(SlidingSyncEvent.RoomData, cachedRoom, {
+                ...roomData([cachedEvent("$b"), cachedEvent("$c")]),
+                limited: true,
+            });
+            await vi.waitFor(() =>
+                expect(client!.getRoom(cachedRoom)!.getLiveTimeline().getEvents().map((e) => e.getId())).toEqual([
+                    "$a",
+                    "$b",
+                    "$c",
+                ]),
+            );
+        });
+
+        // Shown next to each other, the cached and the new would hide everything said in between.
+        it("is let go where the live events do not carry on from it", async () => {
+            await setupClient({ slidingSyncCache: cache });
+            const syncing = sdk!.sync();
+            await httpBackend!.flushAllExpected();
+            await syncing;
+
+            mockSlidingSync!.emit(SlidingSyncEvent.RoomData, cachedRoom, {
+                ...roomData([cachedEvent("$x"), cachedEvent("$y")]),
+                limited: true,
+                prev_batch: "back",
+            });
+            await vi.waitFor(() =>
+                expect(client!.getRoom(cachedRoom)!.getLiveTimeline().getEvents().map((e) => e.getId())).toEqual([
+                    "$x",
+                    "$y",
+                ]),
+            );
+        });
+
+        it("starts the sync anyway when it cannot be read", async () => {
+            cache.loadFirst.mockRejectedValue(new Error("no database"));
+            await setupClient({ slidingSyncCache: cache });
+            const syncing = sdk!.sync();
+            await httpBackend!.flushAllExpected();
+            await syncing;
+            expect(mockSlidingSync!.start).toHaveBeenCalled();
+        });
+    });
+
     describe("rooms", () => {
         beforeAll(async () => {
             await setupClient();

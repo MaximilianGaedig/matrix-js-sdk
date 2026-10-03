@@ -209,7 +209,7 @@ import {
 import { TypedEventEmitter } from "./models/typed-event-emitter.ts";
 import { MAIN_ROOM_TIMELINE, ReceiptType } from "./@types/read_receipts.ts";
 import { type MSC3575SlidingSyncRequest, type MSC3575SlidingSyncResponse, type SlidingSync } from "./sliding-sync.ts";
-import { SlidingSyncSdk } from "./sliding-sync-sdk.ts";
+import { SlidingSyncSdk, type SlidingSyncCache } from "./sliding-sync-sdk.ts";
 import {
     determineFeatureSupport,
     FeatureSupport,
@@ -523,6 +523,13 @@ export interface IStartClientOpts {
      * rather than the stored history.
      */
     savedSyncTrim?: SavedSyncTrim;
+
+    /**
+     * With sliding sync: where the rooms and account data from earlier sessions are kept, to be shown at
+     * once on startup - before any request, so offline too - while the first live sync is under way. See
+     * {@link SlidingSyncCache}.
+     */
+    slidingSyncCache?: SlidingSyncCache;
 
     /**
      * True to put `archived=true</code> on the <code>/initialSync` request. Default: false.
