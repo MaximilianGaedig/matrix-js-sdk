@@ -101,6 +101,7 @@ export {
 export { SyncState, SetPresence } from "./sync.ts";
 export type { ISyncStateData as SyncStateData } from "./sync.ts";
 export { SlidingSyncEvent } from "./sliding-sync.ts";
+export type { SlidingSyncCache, SlidingSyncSnapshot } from "./sliding-sync-sdk.ts";
 export { MediaHandlerEvent } from "./webrtc/mediaHandler.ts";
 export { CallFeedEvent } from "./webrtc/callFeed.ts";
 export { StatsReport } from "./webrtc/stats/statsReport.ts";
