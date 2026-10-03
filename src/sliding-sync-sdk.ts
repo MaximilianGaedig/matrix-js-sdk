@@ -501,16 +501,13 @@ export class SlidingSyncSdk {
     private async onRoomData(roomId: string, roomData: MSC3575RoomData): Promise<void> {
         if (this.fromCache.delete(roomId)) {
             const room = this.client.store.getRoom(roomId);
-            // What the cache showed may be some way behind: when none of what has arrived is in it, there is
-            // a gap between the two, and the cached events are let go rather than shown next to the new ones.
+            // What the cache showed may be some way behind. When what has arrived does not reach back to the
+            // earliest cached event, the cached events before it would sit above a gap that no token leads
+            // into (cached events come with none): the timeline starts again from what arrived, and the
+            // earlier events come back with the history.
             if (room && roomData.limited && roomData.timeline?.length) {
-                const known = new Set(
-                    room
-                        .getLiveTimeline()
-                        .getEvents()
-                        .map((event) => event.getId()),
-                );
-                if (!roomData.timeline.some((event) => known.has(event.event_id))) {
+                const earliest = room.getLiveTimeline().getEvents()[0]?.getId();
+                if (earliest && !roomData.timeline.some((event) => event.event_id === earliest)) {
                     room.resetLiveTimeline(roomData.prev_batch ?? null, null);
                 }
             }
@@ -737,6 +734,7 @@ export class SlidingSyncSdk {
             //       D E   <-- dupes
             //           F <-- new event
             // We bucket events based on if we have seen a known event yet.
+            const firstReceived = timelineEvents[0]?.getId();
             const oldEvents: MatrixEvent[] = [];
             const newEvents: MatrixEvent[] = [];
             let seenKnownEvent = false;
@@ -758,6 +756,16 @@ export class SlidingSyncSdk {
             if (oldEvents.length > 0) {
                 // old events are scrollback, insert them now
                 room.addEventsToTimeline(oldEvents, true, false, room.getLiveTimeline(), roomData.prev_batch);
+            } else if (
+                roomData.prev_batch &&
+                firstReceived !== undefined &&
+                firstReceived === room.getLiveTimeline().getEvents()[0]?.getId() &&
+                !room.getLiveTimeline().getPaginationToken(EventTimeline.BACKWARDS)
+            ) {
+                // What arrived starts with the earliest event we have, so its token is where the history
+                // before ours goes on. Without it the timeline looked complete: a room shown from the cache
+                // (whose events come with no token) never loaded anything earlier.
+                room.getLiveTimeline().setPaginationToken(roomData.prev_batch, EventTimeline.BACKWARDS);
             }
         }
 

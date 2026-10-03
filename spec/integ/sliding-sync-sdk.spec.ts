@@ -27,6 +27,7 @@ import {
 import { TestClient } from "../TestClient";
 import { type IRoomEvent, type IStateEvent } from "../../src";
 import {
+    EventTimeline,
     type MatrixClient,
     type MatrixEvent,
     NotificationCountType,
@@ -259,25 +260,51 @@ describe("SlidingSyncSdk", () => {
             expect(prepared).toEqual([true]);
         });
 
-        it("gives way to live events that carry on from it", async () => {
+        // The cached events come with no token for the history before them: kept above live events that do
+        // not reach back to them, they would end the timeline, and nothing earlier would ever load.
+        it("gives way to live events that do not reach back to its earliest event", async () => {
             await setupClient({ slidingSyncCache: cache });
             const syncing = sdk!.sync();
             await httpBackend!.flushAllExpected();
             await syncing;
+            const timeline = (): EventTimeline => client!.getRoom(cachedRoom)!.getLiveTimeline();
 
             mockSlidingSync!.emit(SlidingSyncEvent.RoomData, cachedRoom, {
                 ...roomData([cachedEvent("$b"), cachedEvent("$c")]),
                 limited: true,
+                prev_batch: "before-b",
             });
             await vi.waitFor(() =>
                 expect(
-                    client!
-                        .getRoom(cachedRoom)!
-                        .getLiveTimeline()
+                    timeline()
+                        .getEvents()
+                        .map((e) => e.getId()),
+                ).toEqual(["$b", "$c"]),
+            );
+            expect(timeline().getPaginationToken(EventTimeline.BACKWARDS)).toBe("before-b");
+        });
+
+        it("takes the history token of live events that start where it does", async () => {
+            await setupClient({ slidingSyncCache: cache });
+            const syncing = sdk!.sync();
+            await httpBackend!.flushAllExpected();
+            await syncing;
+            const timeline = (): EventTimeline => client!.getRoom(cachedRoom)!.getLiveTimeline();
+            expect(timeline().getPaginationToken(EventTimeline.BACKWARDS)).toBeNull();
+
+            mockSlidingSync!.emit(SlidingSyncEvent.RoomData, cachedRoom, {
+                ...roomData([cachedEvent("$a"), cachedEvent("$b"), cachedEvent("$c")]),
+                limited: true,
+                prev_batch: "before-a",
+            });
+            await vi.waitFor(() =>
+                expect(
+                    timeline()
                         .getEvents()
                         .map((e) => e.getId()),
                 ).toEqual(["$a", "$b", "$c"]),
             );
+            expect(timeline().getPaginationToken(EventTimeline.BACKWARDS)).toBe("before-a");
         });
 
         // Shown next to each other, the cached and the new would hide everything said in between.
