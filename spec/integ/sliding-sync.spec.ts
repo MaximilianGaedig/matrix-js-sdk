@@ -199,6 +199,46 @@ describe("SlidingSync", () => {
         });
     });
 
+    describe("carrying on from an earlier connection", () => {
+        beforeAll(setupClient);
+        afterAll(teardownClient);
+
+        it("sends the position it was given, its lists again, and the extensions as not initial", async () => {
+            const slidingSync = new SlidingSync(proxyBaseUrl, new Map(), {}, client!, 1);
+            const listInfo = { ranges: [[0, 10]] };
+            const ext: Extension<any, any> = {
+                name: () => "custom_extension",
+                onRequest: async (isInitial) => ({ initial: isInitial }),
+                onResponse: async () => {},
+                when: () => ExtensionState.PreProcess,
+            };
+            slidingSync.setList("a", listInfo);
+            slidingSync.registerExtension(ext);
+            slidingSync.resumeFrom("41");
+            slidingSync.start();
+
+            httpBackend!
+                .when("POST", syncUrl)
+                .check((req) => {
+                    expect(req.queryParams!["pos"]).toEqual("41");
+                    expect(req.data.lists["a"]).toEqual(listInfo);
+                    expect(req.data.extensions["custom_extension"]).toEqual({ initial: false });
+                })
+                .respond(200, { pos: "42", lists: { a: { count: 1 } }, extensions: {} });
+            await httpBackend!.flushAllExpected();
+
+            // A server that no longer knows the position refuses it, and the connection starts afresh.
+            httpBackend!.when("POST", syncUrl).respond(400, { errcode: "M_UNKNOWN_POS", error: "unknown pos" });
+            await httpBackend!.flushAllExpected();
+            httpBackend!
+                .when("POST", syncUrl)
+                .check((req) => expect(req.queryParams!["pos"]).toBeUndefined())
+                .respond(200, { pos: "1", lists: { a: { count: 1 } }, extensions: {} });
+            await httpBackend!.flushAllExpected();
+            slidingSync.stop();
+        });
+    });
+
     describe("room subscriptions", () => {
         beforeAll(setupClient);
         afterAll(teardownClient);

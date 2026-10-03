@@ -320,6 +320,8 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
 
     private pendingReq?: Promise<MSC3575SlidingSyncResponse>;
     private abortController?: AbortController;
+    /** Where the next start() carries on from, instead of from nothing (see resumeFrom). */
+    private resumePos?: string;
 
     /**
      * Create a new sliding sync instance
@@ -587,12 +589,23 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
     }
 
     /**
+     * Carry on from where an earlier connection got to (a response's `pos`) when start() is called, rather than
+     * be sent everything afresh. Only for a client that still has what that connection was sent - its rooms,
+     * as far as it keeps them - since the server sends only what has changed. A server that no longer knows the
+     * position refuses it, and the connection then starts afresh as usual.
+     */
+    public resumeFrom(pos: string): void {
+        this.resumePos = pos;
+    }
+
+    /**
      * Start syncing with the server. Blocks until stopped.
      */
     public async start(): Promise<void> {
         this.abortController = new AbortController();
 
-        let currentPos: string | undefined;
+        let currentPos: string | undefined = this.resumePos;
+        this.resumePos = undefined;
         while (!this.terminated) {
             this.needsResend = false;
             let resp: MSC3575SlidingSyncResponse | undefined;

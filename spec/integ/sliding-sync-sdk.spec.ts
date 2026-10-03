@@ -76,6 +76,7 @@ describe("SlidingSyncSdk", () => {
         s.setList = vi.fn();
         s.setListRanges = vi.fn();
         s.start = vi.fn();
+        s.resumeFrom = vi.fn();
         s.stop = vi.fn();
         s.resend = vi.fn();
         return s;
@@ -222,7 +223,13 @@ describe("SlidingSyncSdk", () => {
             const syncing = sdk!.sync();
             await vi.waitFor(() => expect(states[0]).toEqual([SyncState.Prepared, true]));
 
-            expect(client!.getRoom(cachedRoom)?.getLiveTimeline().getEvents().map((e) => e.getId())).toEqual(["$a", "$b"]);
+            expect(
+                client!
+                    .getRoom(cachedRoom)
+                    ?.getLiveTimeline()
+                    .getEvents()
+                    .map((e) => e.getId()),
+            ).toEqual(["$a", "$b"]);
             expect(requestsWhenPrepared).toBe(0);
             // the rest follow, with the account data that arrived before they existed
             await vi.waitFor(() => expect(client!.getRoom(otherRoom)?.tags).toEqual({ "m.favourite": {} }));
@@ -234,12 +241,20 @@ describe("SlidingSyncSdk", () => {
         it("is not announced as a first sync a second time when the live sync answers", async () => {
             await setupClient({ slidingSyncCache: cache });
             const prepared: (boolean | undefined)[] = [];
-            client!.on(ClientEvent.Sync, (state, _prev, data) => state === SyncState.Prepared && prepared.push(data?.fromCache));
+            client!.on(
+                ClientEvent.Sync,
+                (state, _prev, data) => state === SyncState.Prepared && prepared.push(data?.fromCache),
+            );
             const syncing = sdk!.sync();
             await httpBackend!.flushAllExpected();
             await syncing;
 
-            mockSlidingSync!.emit(SlidingSyncEvent.Lifecycle, SlidingSyncState.Complete, { pos: "1", lists: {}, rooms: {}, extensions: {} });
+            mockSlidingSync!.emit(SlidingSyncEvent.Lifecycle, SlidingSyncState.Complete, {
+                pos: "1",
+                lists: {},
+                rooms: {},
+                extensions: {},
+            });
 
             expect(prepared).toEqual([true]);
         });
@@ -255,11 +270,13 @@ describe("SlidingSyncSdk", () => {
                 limited: true,
             });
             await vi.waitFor(() =>
-                expect(client!.getRoom(cachedRoom)!.getLiveTimeline().getEvents().map((e) => e.getId())).toEqual([
-                    "$a",
-                    "$b",
-                    "$c",
-                ]),
+                expect(
+                    client!
+                        .getRoom(cachedRoom)!
+                        .getLiveTimeline()
+                        .getEvents()
+                        .map((e) => e.getId()),
+                ).toEqual(["$a", "$b", "$c"]),
             );
         });
 
@@ -276,11 +293,49 @@ describe("SlidingSyncSdk", () => {
                 prev_batch: "back",
             });
             await vi.waitFor(() =>
-                expect(client!.getRoom(cachedRoom)!.getLiveTimeline().getEvents().map((e) => e.getId())).toEqual([
-                    "$x",
-                    "$y",
-                ]),
+                expect(
+                    client!
+                        .getRoom(cachedRoom)!
+                        .getLiveTimeline()
+                        .getEvents()
+                        .map((e) => e.getId()),
+                ).toEqual(["$x", "$y"]),
             );
+        });
+
+        it("carries the connection on from where it was, once every cached room is shown", async () => {
+            cache.loadFirst.mockResolvedValue({ ...(await cache.loadFirst()), pos: "41" });
+            await setupClient({ slidingSyncCache: cache });
+            let restShownWhenResumed: boolean | undefined;
+            vi.mocked(mockSlidingSync!.resumeFrom).mockImplementation(() => {
+                restShownWhenResumed = !!client!.getRoom(otherRoom);
+            });
+            const syncing = sdk!.sync();
+            await httpBackend!.flushAllExpected();
+            await syncing;
+
+            expect(mockSlidingSync!.resumeFrom).toHaveBeenCalledWith("41");
+            // The server sends only rooms that changed: one it describes first would have nothing else.
+            expect(restShownWhenResumed).toBe(true);
+            expect(mockSlidingSync!.start).toHaveBeenCalled();
+        });
+
+        it("starts afresh when the cache says nothing of where it was", async () => {
+            await setupClient({ slidingSyncCache: cache });
+            const syncing = sdk!.sync();
+            await httpBackend!.flushAllExpected();
+            await syncing;
+            expect(mockSlidingSync!.resumeFrom).not.toHaveBeenCalled();
+        });
+
+        it("starts afresh when the rest of the cache cannot be read", async () => {
+            cache.loadFirst.mockResolvedValue({ ...(await cache.loadFirst()), pos: "41" });
+            cache.loadRest.mockRejectedValue(new Error("gone"));
+            await setupClient({ slidingSyncCache: cache });
+            const syncing = sdk!.sync();
+            await httpBackend!.flushAllExpected();
+            await syncing;
+            expect(mockSlidingSync!.resumeFrom).not.toHaveBeenCalled();
         });
 
         it("starts the sync anyway when it cannot be read", async () => {

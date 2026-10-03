@@ -428,6 +428,11 @@ class ExtensionStickyEvents implements Extension<ExtensionStickyEventsRequest, E
 export interface SlidingSyncSnapshot {
     rooms: Record<string, MSC3575RoomData>;
     accountData: ExtensionAccountDataResponse;
+    /**
+     * The `pos` of the last response the snapshot has everything of, rooms and account data. The connection
+     * carries on from it, so the server sends only what changed since, not every room again.
+     */
+    pos?: string;
 }
 
 /**
@@ -449,6 +454,8 @@ export class SlidingSyncSdk {
     private syncState: SyncState | null = null;
     private syncStateData?: ISyncStateData;
     private lastPos: string | null = null;
+    /** The cached snapshot's `pos`, which the connection carries on from once the cache is shown. */
+    private resumePos?: string;
     private failCount = 0;
     private notifEvents: MatrixEvent[] = []; // accumulator of sync events in the current sync response
     private readonly accountData: ExtensionAccountData;
@@ -497,7 +504,12 @@ export class SlidingSyncSdk {
             // What the cache showed may be some way behind: when none of what has arrived is in it, there is
             // a gap between the two, and the cached events are let go rather than shown next to the new ones.
             if (room && roomData.limited && roomData.timeline?.length) {
-                const known = new Set(room.getLiveTimeline().getEvents().map((event) => event.getId()));
+                const known = new Set(
+                    room
+                        .getLiveTimeline()
+                        .getEvents()
+                        .map((event) => event.getId()),
+                );
                 if (!roomData.timeline.some((event) => known.has(event.event_id))) {
                     room.resetLiveTimeline(roomData.prev_batch ?? null, null);
                 }
@@ -1062,6 +1074,12 @@ export class SlidingSyncSdk {
         }
 
         // start syncing
+        if (this.resumePos) {
+            // Carrying on, the server describes only rooms that changed, and a room it describes before the
+            // cache has shown it would have nothing else: the whole cache goes in first.
+            await rest;
+            this.slidingSync.resumeFrom(this.resumePos);
+        }
         const started = this.slidingSync.start();
         await rest;
         await started;
@@ -1084,6 +1102,7 @@ export class SlidingSyncSdk {
 
         await this.replayRooms(first.rooms);
         await this.accountData.onResponse(first.accountData);
+        this.resumePos = first.pos;
         this.preparedFromCache = true;
         this.updateSyncState(SyncState.Prepared, {
             oldSyncToken: undefined,
@@ -1099,6 +1118,8 @@ export class SlidingSyncSdk {
         try {
             rest = await cache.loadRest();
         } catch (err) {
+            // Without these rooms, carrying on would leave them out until something happens in them.
+            this.resumePos = undefined;
             this.syncOpts.logger.warn("Sliding sync: could not read the rest of the cache", err);
         }
         if (!rest) return;
