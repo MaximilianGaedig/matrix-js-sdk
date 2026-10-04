@@ -1187,7 +1187,7 @@ export class SlidingSyncSdk {
         }
         // Their account data (tags, read markers) arrived with the first snapshot, before the rooms existed.
         const late = Object.fromEntries(
-            Object.entries(first.accountData.rooms ?? {}).filter(([roomId]) => rest![roomId]),
+            Object.entries(first.accountData.rooms ?? {}).filter(([roomId]) => rest[roomId]),
         );
         if (Object.keys(late).length) await this.accountData.onResponse({ global: [], rooms: late });
     }

@@ -5012,7 +5012,11 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
     private readonly roomsWithStoredState = new Set<string>();
     private readonly storedStateLoads = new Map<string, Promise<void>>();
 
-    /** @internal Called while replaying a trimmed saved sync. */
+    /**
+     * Called while replaying a trimmed saved sync.
+     *
+     * @internal
+     */
     public markRoomStateStored(roomId: string): void {
         this.roomsWithStoredState.add(roomId);
     }
@@ -6511,7 +6515,9 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         if (key) {
             try {
                 globalThis.localStorage?.setItem(key, JSON.stringify(serverVersions));
-            } catch {}
+            } catch {
+                // Storage full or unavailable: the next start just fetches /versions again.
+            }
         }
         return serverVersions;
     }

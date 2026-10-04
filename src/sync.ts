@@ -834,7 +834,8 @@ export class SyncApi {
 
         // Rooms whose state the replay trimmed: the rest is read from the store when a room is opened.
         for (const [roomId, room] of Object.entries(savedSync.roomsData.join ?? {})) {
-            if ((room as unknown as Record<string, unknown>)[STATE_TRIMMED_KEY]) this.client.markRoomStateStored(roomId);
+            if ((room as unknown as Record<string, unknown>)[STATE_TRIMMED_KEY])
+                this.client.markRoomStateStored(roomId);
         }
 
         const data: ISyncResponse = {
@@ -1289,9 +1290,7 @@ export class SyncApi {
                 // regular timeline events do *not* count towards state. If it's not present, then the state is formed by
                 // the state events plus the timeline events. Note mapSyncEventsFormat returns an empty array if the field
                 // is absent so we explicitly check the field on the original object.
-                const eventsFormingFinalState = hasStateAfter
-                    ? stateAfterEvents
-                    : stateEvents.concat(timelineEvents);
+                const eventsFormingFinalState = hasStateAfter ? stateAfterEvents : stateEvents.concat(timelineEvents);
 
                 const encrypted = this.isRoomEncrypted(room, eventsFormingFinalState);
                 // We store the server-provided value first so it's correct when any of the events fire.
