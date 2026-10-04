@@ -1065,7 +1065,7 @@ export class SlidingSyncSdk {
 
         //   0) Show what the last session had, before any request: the first screen at once, offline too. The
         //      rest of the cached rooms follow in small batches while the live sync gets going.
-        const rest = await this.replayCache();
+        const { rest } = await this.replayCache();
 
         //   1) We need to get push rules so we can check if events should bing as we get
         //      them from /sync. With the cache's there is nothing to wait for: they are refreshed alongside.
@@ -1110,13 +1110,14 @@ export class SlidingSyncSdk {
 
     /**
      * Shows the cached first screen and announces the client prepared; returns the replay of the remaining
-     * rooms, which runs on in small batches while the first live request is made.
+     * rooms, which runs on in small batches while the first live request is made. It is wrapped: an async
+     * function returning the promise itself would make the caller wait for the whole replay.
      */
-    private async replayCache(): Promise<Promise<void>> {
+    private async replayCache(): Promise<{ rest: Promise<void> }> {
         const cache = this.opts.slidingSyncCache;
         if (!cache || this.lastPos) {
             this.markRestLoaded();
-            return Promise.resolve();
+            return { rest: Promise.resolve() };
         }
         let first: SlidingSyncSnapshot | null = null;
         try {
@@ -1126,7 +1127,7 @@ export class SlidingSyncSdk {
         }
         if (!first) {
             this.markRestLoaded();
-            return Promise.resolve();
+            return { rest: Promise.resolve() };
         }
 
         await this.replayRooms(first.rooms);
@@ -1139,7 +1140,7 @@ export class SlidingSyncSdk {
             catchingUp: false,
             fromCache: true,
         });
-        return this.replayRest(cache, first);
+        return { rest: this.replayRest(cache, first) };
     }
 
     private async replayRest(cache: SlidingSyncCache, first: SlidingSyncSnapshot): Promise<void> {

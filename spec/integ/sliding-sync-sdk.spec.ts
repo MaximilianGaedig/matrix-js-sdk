@@ -347,6 +347,28 @@ describe("SlidingSyncSdk", () => {
             expect(mockSlidingSync!.start).toHaveBeenCalled();
         });
 
+        // The rest is replayed in batches while the first live request is out, not before it: with hundreds of rooms,
+        // waiting for all of them held the live sync back for seconds on every reload.
+        it("starts the live sync before the rest of the cache has been replayed", async () => {
+            cache.loadFirst.mockResolvedValue({ ...(await cache.loadFirst()), pos: "41" });
+            const many = Object.fromEntries(
+                Array.from({ length: 200 }, (_, i) => [`!r${i}:localhost`, roomData([cachedEvent(`$r${i}`)])]),
+            );
+            cache.loadRest.mockResolvedValue(many);
+            await setupClient({ slidingSyncCache: cache });
+            let lastShownWhenStarted: boolean | undefined;
+            vi.mocked(mockSlidingSync!.start).mockImplementation(() => {
+                lastShownWhenStarted = !!client!.getRoom("!r199:localhost");
+                return Promise.resolve();
+            });
+            const syncing = sdk!.sync();
+            await httpBackend!.flushAllExpected();
+            await syncing;
+
+            expect(lastShownWhenStarted).toBe(false);
+            expect(client!.getRoom("!r199:localhost")).toBeTruthy();
+        });
+
         // Carrying on, the server describes only rooms that changed: one it describes before the cache has shown
         // it is shown from the cache first, so it does not end up with nothing but the change.
         it("shows a cached room first when the live sync describes it before its turn", async () => {
