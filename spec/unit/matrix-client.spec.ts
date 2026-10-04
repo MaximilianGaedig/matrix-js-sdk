@@ -399,6 +399,10 @@ describe("MatrixClient", function () {
         store.isNewlyCreated = vi.fn().mockReturnValue(Promise.resolve(true));
         store.getUserProfile = vi.fn().mockReturnValue(undefined);
 
+        // The client answers /versions from a copy it keeps in localStorage between runs; a copy left by an earlier
+        // test would hide this test's unstableFeatures.
+        globalThis.localStorage?.clear();
+
         // set unstableFeatures to a defined state before each test
         unstableFeatures = {
             "org.matrix.msc3440.stable": true,
