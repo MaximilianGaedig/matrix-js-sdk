@@ -20,6 +20,7 @@ import { type IRoomEvent, type IStateEvent } from "./sync-accumulator.ts";
 import { TypedEventEmitter } from "./models/typed-event-emitter.ts";
 import { sleep } from "./utils.ts";
 import { type HTTPError } from "./http-api/index.ts";
+import { type Membership } from "./@types/membership.ts";
 
 // /sync requests allow you to set a timeout= but the request may continue
 // beyond that and wedge forever, so we need to track how long we are willing
@@ -110,6 +111,8 @@ export interface MSC3575RoomData {
     prev_batch?: string;
     num_live?: number;
     bump_stamp?: number;
+    /** Our membership of the room, when the server says it: rooms are sent for knocks, leaves and bans too. */
+    membership?: Membership;
 }
 
 interface ListResponse {

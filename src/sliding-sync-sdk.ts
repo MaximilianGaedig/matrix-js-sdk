@@ -727,6 +727,8 @@ export class SlidingSyncSdk {
 
         // TODO: handle threaded / beacon events
 
+        // Whether what arrived overlaps the events the room already has.
+        let carriesOn = false;
         if (roomData.limited || roomData.initial) {
             // we should not know about any of these timeline entries if this is a genuinely new room.
             // If we do, then we've effectively done scrollback (e.g requesting timeline_limit: 1 for
@@ -764,6 +766,7 @@ export class SlidingSyncSdk {
                 }
             }
             timelineEvents = newEvents;
+            carriesOn = seenKnownEvent;
             if (oldEvents.length > 0) {
                 // old events are scrollback, insert them now
                 room.addEventsToTimeline(oldEvents, true, false, room.getLiveTimeline(), roomData.prev_batch);
@@ -783,8 +786,11 @@ export class SlidingSyncSdk {
         }
 
         const encrypted = room.hasEncryptionStateEvent();
-        // we do this first so it's correct when any of the events fire
-        if (roomData.notification_count != null) {
+        // we do this first so it's correct when any of the events fire.
+        // In an encrypted room the server cannot read the events and counts every one: the client works the count
+        // out as it decrypts (fixNotificationCountOnDecryption), and takes the server's only when it is 0, as sync
+        // v2 does.
+        if (roomData.notification_count != null && (!encrypted || roomData.notification_count === 0)) {
             room.setUnreadNotificationCount(NotificationCountType.Total, roomData.notification_count);
         }
 
@@ -808,9 +814,13 @@ export class SlidingSyncSdk {
             room.currentState.setJoinedMemberCount(roomData.joined_count!);
         }
 
-        if (roomData.invite_state) {
-            const inviteStateEvents = mapEvents(this.client, room.roomId, roomData.invite_state);
+        // Invites and knocks come with stripped state at most, and no timeline we may show: for a knock the
+        // server may send the room's latest events, which a knock does not give us the right to see.
+        const membership = roomData.membership;
+        if (roomData.invite_state || membership === KnownMembership.Invite || membership === KnownMembership.Knock) {
+            const inviteStateEvents = mapEvents(this.client, room.roomId, roomData.invite_state ?? []);
             await this.injectRoomEvents(room, inviteStateEvents);
+            if (membership) room.updateMyMembership(membership);
             if (roomData.initial) {
                 room.recalculate();
                 this.client.store.storeRoom(room);
@@ -823,9 +833,20 @@ export class SlidingSyncSdk {
         }
 
         if (roomData.limited) {
-            // set the back-pagination token. Do this *before* adding any
-            // events so that clients can start back-paginating.
-            room.getLiveTimeline().setPaginationToken(roomData.prev_batch ?? null, EventTimeline.BACKWARDS);
+            const liveTimeline = room.getLiveTimeline();
+            if (timelineEvents.length > 0 && liveTimeline.getEvents().length > 0 && !carriesOn) {
+                // More happened than was sent, and what was sent does not carry on from what the room has. Glued
+                // on, the gap's token would become the token of the room's oldest event: paging back would put
+                // the missed events above everything shown, and above the room's creation when it was all shown.
+                // As sync v2 does, the live timeline starts again from what arrived, and the old one is kept.
+                room.resetLiveTimeline(roomData.prev_batch ?? null, null);
+                client.resetNotifTimelineSet();
+            } else if (liveTimeline.getEvents().length === 0) {
+                // set the back-pagination token. Do this *before* adding any
+                // events so that clients can start back-paginating. A timeline that already has events keeps
+                // the token of its own first event.
+                liveTimeline.setPaginationToken(roomData.prev_batch ?? null, EventTimeline.BACKWARDS);
+            }
         }
 
         /* TODO
@@ -886,10 +907,6 @@ export class SlidingSyncSdk {
         // we deliberately don't add ephemeral events to the timeline
         room.addEphemeralEvents(ephemeralEvents);
 
-        // local fields must be set before any async calls because call site assumes
-        // synchronous execution prior to emitting SlidingSyncState.Complete
-        room.updateMyMembership(KnownMembership.Join);
-
         room.setMSC4186SummaryData(roomData.heroes, roomData.joined_count, roomData.invited_count);
 
         // The MSC4480 extension excludes sticky events already present in the timeline, so we have
@@ -897,6 +914,12 @@ export class SlidingSyncSdk {
         room._unstable_addStickyEvents(timelineEvents.filter((e) => e.unstableStickyInfo !== undefined));
 
         room.recalculate();
+        // local fields must be set before any async calls because call site assumes
+        // synchronous execution prior to emitting SlidingSyncState.Complete.
+        // The server's membership wins, and is set after recalculate(), which takes it from our member event:
+        // a left room is not counted as joined on the way, and a rejected federated invite, which has no member
+        // event of ours to send, is left rather than kept as an invite.
+        room.updateMyMembership(membership ?? KnownMembership.Join);
         if (roomData.initial) {
             client.store.storeRoom(room);
             client.emit(ClientEvent.Room, room);
