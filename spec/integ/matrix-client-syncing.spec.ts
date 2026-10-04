@@ -540,6 +540,30 @@ describe("MatrixClient syncing", () => {
             );
         });
 
+        it("should note which cached rooms had their state trimmed", async () => {
+            const markRoomStateStored = vi.spyOn(client!, "markRoomStateStored");
+            client!.store.getSavedSync = vi.fn().mockResolvedValue({
+                nextBatch: "cached_token",
+                roomsData: {
+                    join: {
+                        [roomOne]: { mx_state_trimmed: true, timeline: { events: [] }, state: { events: [] } },
+                        [roomTwo]: { timeline: { events: [] }, state: { events: [] } },
+                    },
+                    invite: {},
+                    leave: {},
+                    knock: {},
+                },
+                accountData: [],
+            });
+            httpBackend!.when("GET", "/sync").respond(200, syncData);
+
+            client!.startClient();
+            await Promise.all([httpBackend!.flushAllExpected(), awaitSyncEvent()]);
+
+            expect(markRoomStateStored).toHaveBeenCalledTimes(1);
+            expect(markRoomStateStored).toHaveBeenCalledWith(roomOne);
+        });
+
         it("should still process room data if the crypto layer fails to process the sync", async () => {
             const cryptoCallbacks = {
                 processSyncChanges: vi.fn().mockRejectedValue(new Error("crypto store is broken")),
