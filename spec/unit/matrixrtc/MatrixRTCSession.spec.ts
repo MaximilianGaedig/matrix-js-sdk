@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 import { type Mock } from "vitest";
+import loglevel from "loglevel";
 
 import { type EventTimeline, EventType, KnownMembership, MatrixClient, type Room } from "../../../src";
 import {
@@ -74,6 +75,35 @@ describe("MatrixRTCSession", () => {
         client.matrixRTC.stop();
         if (sess) await sess.stop();
         sess = undefined;
+    });
+
+    describe("logger", () => {
+        const sessionLoggers = (getLogger: Mock): unknown[] =>
+            getLogger.mock.calls.filter(([name]) => String(name).includes("MatrixRTCSession"));
+
+        // There is a session for every room the client knows, and at start-up they are all made at once. A named
+        // logger reads the stored log level from the browser's storage and stays registered for good, and a room with
+        // no call never logs anything (MEO-118).
+        it("is not made for a room with no call until something is logged", async () => {
+            const getLogger = vi.spyOn(loglevel, "getLogger");
+            sess = MatrixRTCSession.sessionForSlot(client, makeMockRoom([]), callSession);
+            await sess.initialMembershipCalculated;
+
+            expect(sessionLoggers(getLogger)).toEqual([]);
+        });
+
+        it("is made, with the session's prefix, once something is logged", async () => {
+            const mockRoom = makeMockRoom([]);
+            sess = MatrixRTCSession.sessionForSlot(client, mockRoom, callSession);
+            await sess.initialMembershipCalculated;
+            const info = vi.spyOn(console, "info").mockImplementation(() => {});
+
+            await sess.leaveRoomSession();
+
+            expect(
+                info.mock.calls.some(([prefix]) => String(prefix).includes(`[MatrixRTCSession ${mockRoom.roomId}`)),
+            ).toBe(true);
+        });
     });
 
     describe.each([
