@@ -152,7 +152,20 @@ describe("RemoteIndexedDBStoreBackend", () => {
             expect(mockPostMessage).toHaveBeenCalledWith({
                 command: "getSavedSync",
                 seq: expect.any(Number),
-                args: undefined,
+                args: [undefined],
+            });
+        });
+
+        it("getSavedSync passes the trim option to the worker", async () => {
+            stubNextResult({ nextBatch: "tok", roomsMap: {} });
+            const trim = { tail: 1, fullRoomIds: ["!a:b"] };
+
+            await backend.getSavedSync(false, trim);
+
+            expect(mockPostMessage).toHaveBeenCalledWith({
+                command: "getSavedSync",
+                seq: expect.any(Number),
+                args: [trim],
             });
         });
 
