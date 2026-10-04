@@ -442,7 +442,7 @@ export class MatrixRTCSession extends TypedEventEmitter<
         // (prefer sticky events in case of a duplicate)
         options: SessionMembershipsForSlotOpts = DEFAULT_SESSION_MEMBERSHIPS_FOR_SLOT_OPTS,
     ): Promise<CallMembership[]> {
-        const logger = rootLogger.getChild(
+        const logger = lazyLogger(
             `[MatrixRTCSession ${room.roomId} ${slotDescription.application}#${slotDescription.id}]`,
         );
         const callMemberEvents = collectMembersEvents(room, slotDescription, options, logger);
@@ -539,7 +539,7 @@ export class MatrixRTCSession extends TypedEventEmitter<
         private readonly calculateMembershipsOpts?: SessionMembershipsForSlotOpts,
     ) {
         super();
-        this.logger = rootLogger.getChild(
+        this.logger = lazyLogger(
             `[MatrixRTCSession ${roomSubset.roomId} ${slotDescription.application}#${slotDescription.id}]`,
         );
 
@@ -972,7 +972,8 @@ export class MatrixRTCSession extends TypedEventEmitter<
             // If anyone else joins the session it is no longer our responsibility to send the notification.
             // (If we were the joiner we already did sent the notification in the block above.)
             if (this.memberships.length > 0) this.pendingNotificationToSend = undefined;
-        } else {
+        } else if (this.memberships.length > 0) {
+            // Only where there is a call: every room has a session, and this ran for each of them at start-up.
             this.logger.debug(`No membership changes detected for room ${this.roomSubset.roomId}`);
         }
         // This also needs to be done if `changed` = false
@@ -1102,4 +1103,22 @@ function collectMembersEvents(
         );
     }
     return callMemberEvents;
+}
+
+/**
+ * A child of the root logger that is only made once something is logged. There is a session for every room the client
+ * knows, all made at start-up, and making a named logger reads the stored log level from the browser's storage and
+ * keeps the logger registered for good; a room with no call never logs anything.
+ */
+function lazyLogger(namespace: string): Logger {
+    let made: Logger | undefined;
+    const get = (): Logger => (made ??= rootLogger.getChild(namespace));
+    return {
+        trace: (...msg) => get().trace(...msg),
+        debug: (...msg) => get().debug(...msg),
+        info: (...msg) => get().info(...msg),
+        warn: (...msg) => get().warn(...msg),
+        error: (...msg) => get().error(...msg),
+        getChild: (childNamespace) => get().getChild(childNamespace),
+    };
 }
