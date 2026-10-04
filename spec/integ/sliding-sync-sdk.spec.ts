@@ -860,6 +860,87 @@ describe("SlidingSyncSdk", () => {
                     expect(room.getLiveTimeline().getPaginationToken(EventTimeline.BACKWARDS)).toBeNull();
                 });
             });
+
+            describe("membership", () => {
+                it("takes a knock from the server's membership", async () => {
+                    const roomKnock = "!knock:localhost";
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomKnock, {
+                        name: "Knocked",
+                        required_state: [],
+                        timeline: [],
+                        membership: KnownMembership.Knock,
+                        initial: true,
+                    });
+                    await emitPromise(client!, ClientEvent.Room);
+                    expect(client!.getRoom(roomKnock)!.getMyMembership()).toEqual(KnownMembership.Knock);
+                });
+
+                it("leaves an invite the server says is left, though it sends no state for it", async () => {
+                    const roomRejected = "!rejected:localhost";
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomRejected, {
+                        name: "Rejected",
+                        required_state: [],
+                        timeline: [],
+                        invite_state: [
+                            {
+                                type: EventType.RoomMember,
+                                content: { membership: KnownMembership.Invite },
+                                state_key: selfUserId,
+                                sender: "@bob:remote",
+                                event_id: "$rejected_invite",
+                                origin_server_ts: 123456,
+                            },
+                        ],
+                        initial: true,
+                    });
+                    await emitPromise(client!, ClientEvent.Room);
+                    const room = client!.getRoom(roomRejected)!;
+                    expect(room.getMyMembership()).toEqual(KnownMembership.Invite);
+                    // A rejected federated invite: the server has no member event of ours to send.
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomRejected, {
+                        name: "Rejected",
+                        required_state: [],
+                        timeline: [],
+                        membership: KnownMembership.Leave,
+                        limited: true,
+                        prev_batch: "after_leave",
+                    });
+                    await settle();
+                    expect(room.getMyMembership()).toEqual(KnownMembership.Leave);
+                });
+
+                it("does not count a room it left as joined on the way", async () => {
+                    const roomLeft = "!left:localhost";
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomLeft, {
+                        name: "Left",
+                        required_state: [
+                            mkOwnStateEvent(EventType.RoomCreate, {}, ""),
+                            mkOwnStateEvent(EventType.RoomMember, { membership: KnownMembership.Join }, selfUserId),
+                        ],
+                        timeline: [mkOwnEvent(EventType.RoomMessage, { body: "bye" })],
+                        initial: true,
+                    });
+                    await emitPromise(client!, ClientEvent.Room);
+                    const room = client!.getRoom(roomLeft)!;
+                    const seen: string[] = [];
+                    room.on(RoomEvent.MyMembership, (_room, membership) => seen.push(membership));
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomLeft, {
+                        name: "Left",
+                        required_state: [
+                            mkOwnStateEvent(EventType.RoomMember, { membership: KnownMembership.Leave }, selfUserId),
+                        ],
+                        timeline: [],
+                        membership: KnownMembership.Leave,
+                        limited: true,
+                        prev_batch: "after_leave",
+                    });
+                    await settle();
+                    expect(room.getMyMembership()).toEqual(KnownMembership.Leave);
+                    expect(seen).toEqual([KnownMembership.Leave]);
+                    // A left room has no timeline in the response: what it showed stays, with its history.
+                    expect(room.getLiveTimeline().getEvents().length).toBeGreaterThan(0);
+                });
+            });
         });
     });
 

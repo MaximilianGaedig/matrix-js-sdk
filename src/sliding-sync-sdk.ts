@@ -811,9 +811,13 @@ export class SlidingSyncSdk {
             room.currentState.setJoinedMemberCount(roomData.joined_count!);
         }
 
-        if (roomData.invite_state) {
-            const inviteStateEvents = mapEvents(this.client, room.roomId, roomData.invite_state);
+        // Invites and knocks come with stripped state at most, and no timeline we may show: for a knock the
+        // server may send the room's latest events, which a knock does not give us the right to see.
+        const membership = roomData.membership;
+        if (roomData.invite_state || membership === KnownMembership.Invite || membership === KnownMembership.Knock) {
+            const inviteStateEvents = mapEvents(this.client, room.roomId, roomData.invite_state ?? []);
             await this.injectRoomEvents(room, inviteStateEvents);
+            if (membership) room.updateMyMembership(membership);
             if (roomData.initial) {
                 room.recalculate();
                 this.client.store.storeRoom(room);
@@ -900,10 +904,6 @@ export class SlidingSyncSdk {
         // we deliberately don't add ephemeral events to the timeline
         room.addEphemeralEvents(ephemeralEvents);
 
-        // local fields must be set before any async calls because call site assumes
-        // synchronous execution prior to emitting SlidingSyncState.Complete
-        room.updateMyMembership(KnownMembership.Join);
-
         room.setMSC4186SummaryData(roomData.heroes, roomData.joined_count, roomData.invited_count);
 
         // The MSC4480 extension excludes sticky events already present in the timeline, so we have
@@ -911,6 +911,12 @@ export class SlidingSyncSdk {
         room._unstable_addStickyEvents(timelineEvents.filter((e) => e.unstableStickyInfo !== undefined));
 
         room.recalculate();
+        // local fields must be set before any async calls because call site assumes
+        // synchronous execution prior to emitting SlidingSyncState.Complete.
+        // The server's membership wins, and is set after recalculate(), which takes it from our member event:
+        // a left room is not counted as joined on the way, and a rejected federated invite, which has no member
+        // event of ours to send, is left rather than kept as an invite.
+        room.updateMyMembership(membership ?? KnownMembership.Join);
         if (roomData.initial) {
             client.store.storeRoom(room);
             client.emit(ClientEvent.Room, room);
