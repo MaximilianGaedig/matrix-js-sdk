@@ -792,6 +792,74 @@ describe("SlidingSyncSdk", () => {
                     assertTimelineEvents(gotRoom.getLiveTimeline().getEvents(), oldTimeline);
                 });
             });
+
+            // Room data is applied asynchronously after it is emitted.
+            const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 10));
+
+            describe("after a gap", () => {
+                const roomGap = "!gap:localhost";
+                const roomHistory = "!gap_history:localhost";
+                const known = (): IRoomEvent[] => [
+                    mkOwnStateEvent(EventType.RoomCreate, {}, ""),
+                    mkOwnStateEvent(EventType.RoomMember, { membership: KnownMembership.Join }, selfUserId),
+                    mkOwnEvent(EventType.RoomMessage, { body: "before the gap 1" }),
+                    mkOwnEvent(EventType.RoomMessage, { body: "before the gap 2" }),
+                ];
+
+                it("starts the live timeline again from events that do not carry on from it", async () => {
+                    const before = known();
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomGap, {
+                        name: "Gap",
+                        required_state: [],
+                        timeline: before,
+                        initial: true,
+                    });
+                    await emitPromise(client!, ClientEvent.Room);
+                    const after = [
+                        mkOwnEvent(EventType.RoomMessage, { body: "after the gap 1" }),
+                        mkOwnEvent(EventType.RoomMessage, { body: "after the gap 2" }),
+                    ];
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomGap, {
+                        name: "Gap",
+                        required_state: [],
+                        timeline: after,
+                        limited: true,
+                        prev_batch: "gap_token",
+                    });
+                    await settle();
+                    const room = client!.getRoom(roomGap)!;
+                    // Glued on to the old events, paging back from the top would fetch the missed events and
+                    // put them above everything the room already showed.
+                    assertTimelineEvents(room.getLiveTimeline().getEvents(), after);
+                    expect(room.getLiveTimeline().getPaginationToken(EventTimeline.BACKWARDS)).toEqual("gap_token");
+                    expect(room.getTimelineForEvent(before[2].event_id)).not.toBe(room.getLiveTimeline());
+                });
+
+                it("keeps the history token of a timeline that carries on", async () => {
+                    const before = known();
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomHistory, {
+                        name: "History",
+                        required_state: [],
+                        timeline: before,
+                        initial: true,
+                    });
+                    await emitPromise(client!, ClientEvent.Room);
+                    const room = client!.getRoom(roomHistory)!;
+                    expect(room.getLiveTimeline().getPaginationToken(EventTimeline.BACKWARDS)).toBeNull();
+                    const next = mkOwnEvent(EventType.RoomMessage, { body: "next" });
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomHistory, {
+                        name: "History",
+                        required_state: [],
+                        timeline: [before[3], next],
+                        limited: true,
+                        prev_batch: "token_before_the_last_known_event",
+                    });
+                    await settle();
+                    assertTimelineEvents(room.getLiveTimeline().getEvents(), [...before, next]);
+                    // The room is shown back to its creation: a token here would page into events it already has.
+                    expect(room.getLiveTimeline().getPaginationToken(EventTimeline.BACKWARDS)).toBeNull();
+                });
+            });
         });
     });
 

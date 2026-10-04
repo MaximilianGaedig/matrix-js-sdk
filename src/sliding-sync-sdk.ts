@@ -727,6 +727,8 @@ export class SlidingSyncSdk {
 
         // TODO: handle threaded / beacon events
 
+        // Whether what arrived overlaps the events the room already has.
+        let carriesOn = false;
         if (roomData.limited || roomData.initial) {
             // we should not know about any of these timeline entries if this is a genuinely new room.
             // If we do, then we've effectively done scrollback (e.g requesting timeline_limit: 1 for
@@ -764,6 +766,7 @@ export class SlidingSyncSdk {
                 }
             }
             timelineEvents = newEvents;
+            carriesOn = seenKnownEvent;
             if (oldEvents.length > 0) {
                 // old events are scrollback, insert them now
                 room.addEventsToTimeline(oldEvents, true, false, room.getLiveTimeline(), roomData.prev_batch);
@@ -823,9 +826,20 @@ export class SlidingSyncSdk {
         }
 
         if (roomData.limited) {
-            // set the back-pagination token. Do this *before* adding any
-            // events so that clients can start back-paginating.
-            room.getLiveTimeline().setPaginationToken(roomData.prev_batch ?? null, EventTimeline.BACKWARDS);
+            const liveTimeline = room.getLiveTimeline();
+            if (timelineEvents.length > 0 && liveTimeline.getEvents().length > 0 && !carriesOn) {
+                // More happened than was sent, and what was sent does not carry on from what the room has. Glued
+                // on, the gap's token would become the token of the room's oldest event: paging back would put
+                // the missed events above everything shown, and above the room's creation when it was all shown.
+                // As sync v2 does, the live timeline starts again from what arrived, and the old one is kept.
+                room.resetLiveTimeline(roomData.prev_batch ?? null, null);
+                client.resetNotifTimelineSet();
+            } else if (liveTimeline.getEvents().length === 0) {
+                // set the back-pagination token. Do this *before* adding any
+                // events so that clients can start back-paginating. A timeline that already has events keeps
+                // the token of its own first event.
+                liveTimeline.setPaginationToken(roomData.prev_batch ?? null, EventTimeline.BACKWARDS);
+            }
         }
 
         /* TODO
