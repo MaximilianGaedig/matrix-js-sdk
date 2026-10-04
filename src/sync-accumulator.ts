@@ -896,8 +896,22 @@ export interface CachedTimelineChunk {
 /** Marks a pagination token as "the stored timeline before this event ID" rather than a server token. */
 export const LOCAL_PAGINATION_PREFIX = "mx_stored_before:";
 
+/**
+ * Marks a timeline whose history is reached by paging back from the room's latest event: /messages without a
+ * `from`. A room shown from a cache can lack a token for what is before its events (sliding sync carries a
+ * connection on without describing rooms again), and without one it looked as if it had no history.
+ */
+export const FROM_LATEST_PAGINATION_TOKEN = "mx_from_latest";
+
 /** Event types a room preview shows: the tail must reach back to one of these. */
-const PREVIEW_TYPES = new Set(["m.room.message", "m.room.encrypted", "m.sticker", "m.poll.start", "org.matrix.msc3381.poll.start", "m.call.invite"]);
+const PREVIEW_TYPES = new Set([
+    "m.room.message",
+    "m.room.encrypted",
+    "m.sticker",
+    "m.poll.start",
+    "org.matrix.msc3381.poll.start",
+    "m.call.invite",
+]);
 const MAX_TAIL_EXTENSION = 10;
 
 function trimmedTimelineStart(timeline: TimelineEntry[], tail: number): number {

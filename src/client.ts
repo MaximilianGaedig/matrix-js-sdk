@@ -20,7 +20,7 @@ limitations under the License.
 
 import type { IDeviceKeys, IOneTimeKey } from "./@types/crypto.ts";
 import { type ISyncStateData, type SetPresence, SyncApi, type SyncApiOptions, SyncState } from "./sync.ts";
-import { LOCAL_PAGINATION_PREFIX, type SavedSyncTrim } from "./sync-accumulator.ts";
+import { FROM_LATEST_PAGINATION_TOKEN, LOCAL_PAGINATION_PREFIX, type SavedSyncTrim } from "./sync-accumulator.ts";
 import {
     EventStatus,
     type IContent,
@@ -5105,7 +5105,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             dir: dir,
         };
 
-        if (fromToken) {
+        if (fromToken && fromToken !== FROM_LATEST_PAGINATION_TOKEN) {
             params.from = fromToken;
         }
 

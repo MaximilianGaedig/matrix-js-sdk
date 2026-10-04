@@ -19,6 +19,7 @@ import { NotificationCountType, Room, RoomEvent } from "./models/room.ts";
 import { logger } from "./logger.ts";
 import { promiseMapSeries, sleep } from "./utils.ts";
 import { EventTimeline } from "./models/event-timeline.ts";
+import { FROM_LATEST_PAGINATION_TOKEN } from "./sync-accumulator.ts";
 import { ClientEvent, type IStoredClientOpts, type MatrixClient } from "./client.ts";
 import {
     type ISyncStateData,
@@ -456,6 +457,11 @@ export class SlidingSyncSdk {
     private lastPos: string | null = null;
     /** The cached snapshot's `pos`, which the connection carries on from once the cache is shown. */
     private resumePos?: string;
+    /** Cached rooms not shown yet: shown in batches, or at once when the live sync describes one first. */
+    private pendingRest = new Map<string, MSC3575RoomData>();
+    /** Settles once the rest of the cache has been read (or there is none to read). */
+    private markRestLoaded!: () => void;
+    private readonly restLoaded = new Promise<void>((resolve) => (this.markRestLoaded = resolve));
     private failCount = 0;
     private notifEvents: MatrixEvent[] = []; // accumulator of sync events in the current sync response
     private readonly accountData: ExtensionAccountData;
@@ -499,6 +505,11 @@ export class SlidingSyncSdk {
     }
 
     private async onRoomData(roomId: string, roomData: MSC3575RoomData): Promise<void> {
+        const waiting = this.pendingRest.get(roomId);
+        if (waiting) {
+            this.pendingRest.delete(roomId);
+            await this.replayRooms({ [roomId]: waiting });
+        }
         if (this.fromCache.delete(roomId)) {
             const room = this.client.store.getRoom(roomId);
             // What the cache showed may be some way behind. When what has arrived does not reach back to the
@@ -760,7 +771,9 @@ export class SlidingSyncSdk {
                 roomData.prev_batch &&
                 firstReceived !== undefined &&
                 firstReceived === room.getLiveTimeline().getEvents()[0]?.getId() &&
-                !room.getLiveTimeline().getPaginationToken(EventTimeline.BACKWARDS)
+                [null, FROM_LATEST_PAGINATION_TOKEN].includes(
+                    room.getLiveTimeline().getPaginationToken(EventTimeline.BACKWARDS),
+                )
             ) {
                 // What arrived starts with the earliest event we have, so its token is where the history
                 // before ours goes on. Without it the timeline looked complete: a room shown from the cache
@@ -1083,10 +1096,12 @@ export class SlidingSyncSdk {
 
         // start syncing
         if (this.resumePos) {
-            // Carrying on, the server describes only rooms that changed, and a room it describes before the
-            // cache has shown it would have nothing else: the whole cache goes in first.
-            await rest;
-            this.slidingSync.resumeFrom(this.resumePos);
+            // Carrying on, the server describes only rooms that changed, and a room it describes before the cache
+            // has shown it would have nothing else. The rest of the cache is read first; a room still waiting in
+            // it when the server describes it is shown from it then (see onRoomData), so nothing waits for the
+            // whole of it.
+            await this.restLoaded;
+            if (this.resumePos) this.slidingSync.resumeFrom(this.resumePos);
         }
         const started = this.slidingSync.start();
         await rest;
@@ -1099,14 +1114,20 @@ export class SlidingSyncSdk {
      */
     private async replayCache(): Promise<Promise<void>> {
         const cache = this.opts.slidingSyncCache;
-        if (!cache || this.lastPos) return Promise.resolve();
+        if (!cache || this.lastPos) {
+            this.markRestLoaded();
+            return Promise.resolve();
+        }
         let first: SlidingSyncSnapshot | null = null;
         try {
             first = await cache.loadFirst();
         } catch (err) {
             this.syncOpts.logger.warn("Sliding sync: could not read the cache", err);
         }
-        if (!first) return Promise.resolve();
+        if (!first) {
+            this.markRestLoaded();
+            return Promise.resolve();
+        }
 
         await this.replayRooms(first.rooms);
         await this.accountData.onResponse(first.accountData);
@@ -1130,14 +1151,15 @@ export class SlidingSyncSdk {
             this.resumePos = undefined;
             this.syncOpts.logger.warn("Sliding sync: could not read the rest of the cache", err);
         }
-        if (!rest) return;
         // Rooms the live sync has already described are not replayed over that.
-        const entries = Object.entries(rest).filter(([roomId]) => !this.client.getRoom(roomId));
-        for (let i = 0; i < entries.length; i += CACHE_REPLAY_BATCH) {
+        this.pendingRest = new Map(Object.entries(rest ?? {}).filter(([roomId]) => !this.client.getRoom(roomId)));
+        this.markRestLoaded();
+        if (!rest) return;
+        while (this.pendingRest.size) {
             await new Promise((resolve) => setTimeout(resolve, 0));
-            await this.replayRooms(
-                Object.fromEntries(entries.slice(i, i + CACHE_REPLAY_BATCH).filter(([id]) => !this.client.getRoom(id))),
-            );
+            const batch = [...this.pendingRest.entries()].slice(0, CACHE_REPLAY_BATCH);
+            for (const [roomId] of batch) this.pendingRest.delete(roomId);
+            await this.replayRooms(Object.fromEntries(batch));
         }
         // Their account data (tags, read markers) arrived with the first snapshot, before the rooms existed.
         const late = Object.fromEntries(
@@ -1146,12 +1168,25 @@ export class SlidingSyncSdk {
         if (Object.keys(late).length) await this.accountData.onResponse({ global: [], rooms: late });
     }
 
+    /**
+     * A cached room with no token for the history before its events, and not shown back to its creation, pages
+     * back from its latest event instead: a connection that carries on does not describe it again, and without
+     * a token it looked as if it had no history at all.
+     */
+    private markHistoryFromLatest(roomId: string): void {
+        const timeline = this.client.getRoom(roomId)?.getLiveTimeline();
+        if (!timeline || timeline.getPaginationToken(EventTimeline.BACKWARDS)) return;
+        if (timeline.getEvents().some((event) => event.getType() === EventType.RoomCreate)) return;
+        timeline.setPaginationToken(FROM_LATEST_PAGINATION_TOKEN, EventTimeline.BACKWARDS);
+    }
+
     private async replayRooms(rooms: Record<string, MSC3575RoomData>): Promise<void> {
         for (const [roomId, roomData] of Object.entries(rooms)) {
             if (this.client.getRoom(roomId)) continue;
             this.fromCache.add(roomId);
             try {
                 await this.applyRoomData(roomId, { ...roomData, initial: true, num_live: 0 });
+                this.markHistoryFromLatest(roomId);
             } catch (err) {
                 this.fromCache.delete(roomId);
                 this.syncOpts.logger.warn("Sliding sync: could not show cached room", roomId, err);

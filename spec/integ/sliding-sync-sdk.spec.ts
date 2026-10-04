@@ -25,6 +25,7 @@ import {
     type Extension,
 } from "../../src/sliding-sync";
 import { TestClient } from "../TestClient";
+import { FROM_LATEST_PAGINATION_TOKEN } from "../../src/sync-accumulator";
 import { type IRoomEvent, type IStateEvent } from "../../src";
 import {
     EventTimeline,
@@ -290,7 +291,7 @@ describe("SlidingSyncSdk", () => {
             await httpBackend!.flushAllExpected();
             await syncing;
             const timeline = (): EventTimeline => client!.getRoom(cachedRoom)!.getLiveTimeline();
-            expect(timeline().getPaginationToken(EventTimeline.BACKWARDS)).toBeNull();
+            expect(timeline().getPaginationToken(EventTimeline.BACKWARDS)).toBe(FROM_LATEST_PAGINATION_TOKEN);
 
             mockSlidingSync!.emit(SlidingSyncEvent.RoomData, cachedRoom, {
                 ...roomData([cachedEvent("$a"), cachedEvent("$b"), cachedEvent("$c")]),
@@ -330,21 +331,59 @@ describe("SlidingSyncSdk", () => {
             );
         });
 
-        it("carries the connection on from where it was, once every cached room is shown", async () => {
+        it("carries the connection on from where it was, once the rest of the cache is read", async () => {
             cache.loadFirst.mockResolvedValue({ ...(await cache.loadFirst()), pos: "41" });
             await setupClient({ slidingSyncCache: cache });
-            let restShownWhenResumed: boolean | undefined;
+            let restReadWhenResumed: boolean | undefined;
             vi.mocked(mockSlidingSync!.resumeFrom).mockImplementation(() => {
-                restShownWhenResumed = !!client!.getRoom(otherRoom);
+                restReadWhenResumed = cache.loadRest.mock.calls.length > 0;
             });
             const syncing = sdk!.sync();
             await httpBackend!.flushAllExpected();
             await syncing;
 
             expect(mockSlidingSync!.resumeFrom).toHaveBeenCalledWith("41");
-            // The server sends only rooms that changed: one it describes first would have nothing else.
-            expect(restShownWhenResumed).toBe(true);
+            expect(restReadWhenResumed).toBe(true);
             expect(mockSlidingSync!.start).toHaveBeenCalled();
+        });
+
+        // Carrying on, the server describes only rooms that changed: one it describes before the cache has shown
+        // it is shown from the cache first, so it does not end up with nothing but the change.
+        it("shows a cached room first when the live sync describes it before its turn", async () => {
+            cache.loadFirst.mockResolvedValue({ ...(await cache.loadFirst()), pos: "41" });
+            await setupClient({ slidingSyncCache: cache });
+            const syncing = sdk!.sync();
+            await httpBackend!.flushAllExpected();
+            await syncing;
+
+            mockSlidingSync!.emit(SlidingSyncEvent.RoomData, otherRoom, {
+                name: "Cached",
+                required_state: [],
+                timeline: [cachedEvent("$new")],
+                num_live: 1,
+            } as MSC3575RoomData);
+            await vi.waitFor(() =>
+                expect(
+                    client!
+                        .getRoom(otherRoom)
+                        ?.getLiveTimeline()
+                        .getEvents()
+                        .map((e) => e.getId()),
+                ).toEqual(["$z", "$new"]),
+            );
+            expect(client!.getRoom(otherRoom)!.name).toBe("Cached");
+        });
+
+        // Nothing told it where the history before its events is: it is reached from the room's latest event.
+        it("pages a cached room without a token back from its latest event", async () => {
+            await setupClient({ slidingSyncCache: cache });
+            const syncing = sdk!.sync();
+            await httpBackend!.flushAllExpected();
+            await syncing;
+
+            expect(client!.getRoom(cachedRoom)!.getLiveTimeline().getPaginationToken(EventTimeline.BACKWARDS)).toBe(
+                FROM_LATEST_PAGINATION_TOKEN,
+            );
         });
 
         it("starts afresh when the cache says nothing of where it was", async () => {
