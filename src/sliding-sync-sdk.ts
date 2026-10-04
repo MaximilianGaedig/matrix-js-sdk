@@ -786,8 +786,11 @@ export class SlidingSyncSdk {
         }
 
         const encrypted = room.hasEncryptionStateEvent();
-        // we do this first so it's correct when any of the events fire
-        if (roomData.notification_count != null) {
+        // we do this first so it's correct when any of the events fire.
+        // In an encrypted room the server cannot read the events and counts every one: the client works the count
+        // out as it decrypts (fixNotificationCountOnDecryption), and takes the server's only when it is 0, as sync
+        // v2 does.
+        if (roomData.notification_count != null && (!encrypted || roomData.notification_count === 0)) {
             room.setUnreadNotificationCount(NotificationCountType.Total, roomData.notification_count);
         }
 

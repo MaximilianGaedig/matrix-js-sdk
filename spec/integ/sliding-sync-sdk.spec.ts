@@ -861,6 +861,41 @@ describe("SlidingSyncSdk", () => {
                 });
             });
 
+            describe("in an encrypted room", () => {
+                const roomEncrypted = "!encrypted_counts:localhost";
+
+                it("keeps the unread count it worked out itself, unless the server says there are none", async () => {
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomEncrypted, {
+                        name: "Encrypted",
+                        required_state: [
+                            mkOwnStateEvent(EventType.RoomCreate, {}, ""),
+                            mkOwnStateEvent(EventType.RoomMember, { membership: KnownMembership.Join }, selfUserId),
+                            mkOwnStateEvent(EventType.RoomEncryption, { algorithm: "m.megolm.v1.aes-sha2" }, ""),
+                        ],
+                        timeline: [],
+                        initial: true,
+                    });
+                    await emitPromise(client!, ClientEvent.Room);
+                    const room = client!.getRoom(roomEncrypted)!;
+                    // As decrypting found: the server cannot read the events, so counts every one.
+                    room.setUnreadNotificationCount(NotificationCountType.Total, 2);
+                    const update = (count: number): void => {
+                        mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomEncrypted, {
+                            name: "Encrypted",
+                            required_state: [],
+                            timeline: [],
+                            notification_count: count,
+                        });
+                    };
+                    update(5);
+                    await settle();
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Total)).toEqual(2);
+                    update(0);
+                    await settle();
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Total)).toEqual(0);
+                });
+            });
+
             describe("membership", () => {
                 it("takes a knock from the server's membership", async () => {
                     const roomKnock = "!knock:localhost";
